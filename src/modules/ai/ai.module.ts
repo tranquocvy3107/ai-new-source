@@ -13,7 +13,6 @@ import { MemoryService } from './memory';
 import { ChunkService, RagService, VectorService } from './rag';
 import { AgentStreamService } from './stream';
 import {
-  CheckConnectTool,
   MemoryLookupTool,
   SemrushTrafficTool,
   UrlSearchTool,
@@ -39,7 +38,6 @@ import {
     MemoryService,
     UrlSearchTool,
     WebScrapeTool,
-    CheckConnectTool,
     SemrushTrafficTool,
     MemoryLookupTool,
     AgentGraphService,

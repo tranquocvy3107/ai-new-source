@@ -6,7 +6,6 @@ import { AgentEventEntity, AgentRunEntity } from '../../../database/entities';
 import { MemoryService } from '../memory';
 import { AgentStreamService } from '../stream';
 import {
-  CheckConnectTool,
   MemoryLookupTool,
   SemrushTrafficTool,
   UrlSearchTool,
@@ -24,7 +23,7 @@ export class AgentService {
     private readonly streamService: AgentStreamService,
     private readonly urlSearchTool: UrlSearchTool,
     private readonly webScrapeTool: WebScrapeTool,
-    private readonly checkConnectTool: CheckConnectTool,
+    // private readonly checkConnectTool: CheckConnectTool,
     private readonly semrushTrafficTool: SemrushTrafficTool,
     private readonly memoryLookupTool: MemoryLookupTool,
     @InjectRepository(AgentRunEntity)
@@ -63,7 +62,7 @@ export class AgentService {
         maxSteps,
         tools: [
           this.urlSearchTool,
-          this.checkConnectTool,
+          // this.checkConnectTool,
           this.webScrapeTool,
           this.semrushTrafficTool,
           this.memoryLookupTool,

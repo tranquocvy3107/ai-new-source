@@ -29,7 +29,6 @@ Recent context:
 
 Available tools:
 - url_search: search web links for a keyword/query.
-- check_connect: verify URL connectivity and status code before scraping.
 - web_scrape: fetch and extract meaningful page text from a URL.
 - semrush_traffic: fetch traffic/authority signals for a domain (if Semrush credential is configured).
 - memory_lookup: search persisted memory for this domain.

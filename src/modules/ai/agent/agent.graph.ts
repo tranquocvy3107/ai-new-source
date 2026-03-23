@@ -55,10 +55,10 @@ const AgentState = Annotation.Root({
     reducer: (current, update) => [...current, ...update],
     default: () => [],
   }),
-  checkedConnectUrls: Annotation<string[]>({
-    reducer: (current, update) => [...current, ...update],
-    default: () => [],
-  }),
+  // checkedConnectUrls: Annotation<string[]>({
+  //   reducer: (current, update) => [...current, ...update],
+  //   default: () => [],
+  // }),
   toolHistory: Annotation<string[]>({
     reducer: (current, update) => [...current, ...update],
     default: () => [],
@@ -162,8 +162,8 @@ export class AgentGraphService {
           tool.name === 'url_search' ? this.buildSearchSignature(extractedSearchUrls) : '';
         const scrapedUrl =
           tool.name === 'web_scrape' && this.isLikelyUrl(toolInput) ? [toolInput.trim()] : [];
-        const checkedUrl =
-          tool.name === 'check_connect' && this.isLikelyUrl(toolInput) ? [toolInput.trim()] : [];
+        // const checkedUrl =
+        //   tool.name === 'check_connect' && this.isLikelyUrl(toolInput) ? [toolInput.trim()] : [];
 
         return {
           lastToolResult: result,
@@ -172,7 +172,7 @@ export class AgentGraphService {
           lastSearchUrls: extractedSearchUrls,
           searchSignatures: searchSignature ? [searchSignature] : [],
           visitedScrapeUrls: scrapedUrl,
-          checkedConnectUrls: checkedUrl,
+          // checkedConnectUrls: checkedUrl,
           toolHistory: [`${tool.name}|${toolInput}`],
           scratchpad: [
             `Tool ${tool.name}(${toolInput}) => ${result.output.slice(0, 1200)}`,
@@ -328,29 +328,29 @@ export class AgentGraphService {
         };
       }
 
-      if (input && !state.checkedConnectUrls.some((item) => item === input)) {
-        return {
-          thought:
-            'Before scraping, I should verify connectivity/status for this URL to avoid 403/500 issues.',
-          action: 'tool',
-          toolName: 'check_connect',
-          toolInput: input,
-        };
-      }
+      // if (input && !state.checkedConnectUrls.some((item) => item === input)) {
+      //   return {
+      //     thought:
+      //       'Before scraping, I should verify connectivity/status for this URL to avoid 403/500 issues.',
+      //     action: 'tool',
+      //     toolName: 'check_connect',
+      //     toolInput: input,
+      //   };
+      // }
     }
 
-    if (decision.toolName === 'check_connect') {
-      const input = (decision.toolInput ?? '').trim();
-      if (!this.isLikelyUrl(input) && nextUrlToScrape) {
-        return {
-          thought:
-            'Connectivity check needs a valid URL. I will check the next candidate URL from search results.',
-          action: 'tool',
-          toolName: 'check_connect',
-          toolInput: nextUrlToScrape,
-        };
-      }
-    }
+    // if (decision.toolName === 'check_connect') {
+    //   const input = (decision.toolInput ?? '').trim();
+    //   if (!this.isLikelyUrl(input) && nextUrlToScrape) {
+    //     return {
+    //       thought:
+    //         'Connectivity check needs a valid URL. I will check the next candidate URL from search results.',
+    //       action: 'tool',
+    //       toolName: 'check_connect',
+    //       toolInput: nextUrlToScrape,
+    //     };
+    //   }
+    // }
 
     return decision;
   }

@@ -185,7 +185,7 @@ export class UrlSearchTool implements AgentTool {
       appended.push({
         title: `${domain}${path} (heuristic candidate)`,
         link,
-        snippet: 'Potential affiliate/partner related endpoint to verify by check_connect + scrape.',
+        snippet: 'Potential affiliate/partner related endpoint to verify by scrape.',
         query: 'heuristic',
         score: path.includes('affiliate') || path.includes('partner') ? 32 : 20,
       });
