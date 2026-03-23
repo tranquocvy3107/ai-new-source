@@ -31,7 +31,31 @@ export class AiController {
   async runAgent(@Body() body: AgentRunDto) {
     const defaultDomain = this.configService.get<string>('AGENT_DEFAULT_DOMAIN', 'general');
     const domain = body.domain ?? defaultDomain;
-    return this.agentService.runAgent(body.input, domain, body.saveMemory ?? true);
+    return this.agentService.startAgentRun(body.input, domain, body.saveMemory ?? true);
+  }
+
+  @Get('agent/runs/:runId')
+  async getRunStatus(@Param('runId') runId: string) {
+    const status = await this.agentService.getRunStatus(runId);
+    if (!status) {
+      return {
+        runId,
+        status: 'not_found',
+      };
+    }
+    return status;
+  }
+
+  @Get('agent/runs/:runId/result')
+  async getRunResult(@Param('runId') runId: string) {
+    const result = await this.agentService.getRunResult(runId);
+    if (!result) {
+      return {
+        runId,
+        status: 'not_found',
+      };
+    }
+    return result;
   }
 
   @Get('agent/runs/:runId/events')

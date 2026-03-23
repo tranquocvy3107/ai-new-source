@@ -36,3 +36,9 @@ export interface AgentRunResult {
   finalAnswer: string;
   events: AgentEvent[];
 }
+
+export interface AgentRunAccepted {
+  runId: string;
+  domain: string;
+  status: 'running';
+}

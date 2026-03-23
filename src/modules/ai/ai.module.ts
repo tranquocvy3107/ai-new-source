@@ -17,6 +17,7 @@ import {
   SemrushTrafficTool,
   UrlSearchTool,
   WebScrapeTool,
+  CheckConnectTool
 } from './tools';
 
 @Module({
@@ -40,8 +41,10 @@ import {
     WebScrapeTool,
     SemrushTrafficTool,
     MemoryLookupTool,
+    CheckConnectTool,
     AgentGraphService,
     AgentService,
+    
   ],
   exports: [AgentService],
 })

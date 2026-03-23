@@ -66,13 +66,16 @@ Server mặc định: `http://localhost:5000/api`
 }
 ```
 
-Response trả về gồm:
-- `events`: thinking, tool_call, tool_result, final_response
-- `finalAnswer`
-- `runId` để FE lấy lại lịch sử event
+Response trả về ngay:
+- `runId`
+- `status: "running"`
+
+Research sẽ chạy nền theo `runId`.
 
 ## 7) API lấy stream/history
 
+- Trạng thái run: `GET /api/ai/agent/runs/:runId`
+- Kết quả tổng hợp: `GET /api/ai/agent/runs/:runId/result`
 - Lịch sử event: `GET /api/ai/agent/runs/:runId/events`
 - Live SSE: `GET /api/ai/agent/runs/:runId/live`
 

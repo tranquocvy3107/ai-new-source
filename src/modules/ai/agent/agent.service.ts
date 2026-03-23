@@ -6,13 +6,14 @@ import { AgentEventEntity, AgentRunEntity } from '../../../database/entities';
 import { MemoryService } from '../memory';
 import { AgentStreamService } from '../stream';
 import {
+  CheckConnectTool,
   MemoryLookupTool,
   SemrushTrafficTool,
   UrlSearchTool,
   WebScrapeTool,
 } from '../tools';
 import { AgentGraphService } from './agent.graph';
-import { AgentEvent, AgentRunResult } from './agent.types';
+import { AgentEvent, AgentRunAccepted, AgentRunResult } from './agent.types';
 
 @Injectable()
 export class AgentService {
@@ -22,8 +23,8 @@ export class AgentService {
     private readonly memoryService: MemoryService,
     private readonly streamService: AgentStreamService,
     private readonly urlSearchTool: UrlSearchTool,
+    private readonly checkConnectTool: CheckConnectTool,
     private readonly webScrapeTool: WebScrapeTool,
-    // private readonly checkConnectTool: CheckConnectTool,
     private readonly semrushTrafficTool: SemrushTrafficTool,
     private readonly memoryLookupTool: MemoryLookupTool,
     @InjectRepository(AgentRunEntity)
@@ -32,8 +33,7 @@ export class AgentService {
     private readonly eventRepo: Repository<AgentEventEntity>,
   ) {}
 
-  async runAgent(input: string, domain: string, saveMemory = true): Promise<AgentRunResult> {
-    const maxSteps = this.configService.get<number>('AGENT_MAX_STEPS', 8);
+  async startAgentRun(input: string, domain: string, saveMemory = true): Promise<AgentRunAccepted> {
     const run = await this.runRepo.save(
       this.runRepo.create({
         domain,
@@ -42,13 +42,37 @@ export class AgentService {
       }),
     );
 
+    this.streamService.getRunStream(run.id);
+    setTimeout(() => {
+      void this.processRun(run.id, input, domain, saveMemory);
+    }, 0);
+
+    return {
+      runId: run.id,
+      domain,
+      status: 'running',
+    };
+  }
+
+  private async processRun(
+    runId: string,
+    input: string,
+    domain: string,
+    saveMemory: boolean,
+  ): Promise<void> {
+    const run = await this.runRepo.findOne({ where: { id: runId } });
+    if (!run) {
+      return;
+    }
+
+    const maxSteps = this.configService.get<number>('AGENT_MAX_STEPS', 8);
     const events: AgentEvent[] = [];
     const pushEvent = async (event: AgentEvent): Promise<void> => {
       events.push(event);
-      this.streamService.emit(run.id, event);
+      this.streamService.emit(runId, event);
       await this.eventRepo.save(
         this.eventRepo.create({
-          runId: run.id,
+          runId,
           type: event.type,
           payload: event.payload,
         }),
@@ -62,7 +86,7 @@ export class AgentService {
         maxSteps,
         tools: [
           this.urlSearchTool,
-          // this.checkConnectTool,
+          this.checkConnectTool,
           this.webScrapeTool,
           this.semrushTrafficTool,
           this.memoryLookupTool,
@@ -105,14 +129,7 @@ export class AgentService {
         scratchpadItems: execution.scratchpad.length,
       };
       await this.runRepo.save(run);
-      this.streamService.complete(run.id);
-
-      return {
-        runId: run.id,
-        domain,
-        finalAnswer: execution.finalAnswer,
-        events,
-      };
+      this.streamService.complete(runId);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown agent error';
       await pushEvent({
@@ -124,15 +141,50 @@ export class AgentService {
       run.status = 'failed';
       run.finalAnswer = message;
       await this.runRepo.save(run);
-      this.streamService.complete(run.id);
-
-      return {
-        runId: run.id,
-        domain,
-        finalAnswer: `Agent failed: ${message}`,
-        events,
-      };
+      this.streamService.complete(runId);
     }
+  }
+
+  async getRunStatus(runId: string): Promise<{
+    runId: string;
+    status: AgentRunEntity['status'];
+    domain: string;
+    finalAnswer: string | null;
+    updatedAt: Date;
+  } | null> {
+    const run = await this.runRepo.findOne({ where: { id: runId } });
+    if (!run) {
+      return null;
+    }
+
+    return {
+      runId: run.id,
+      status: run.status,
+      domain: run.domain,
+      finalAnswer: run.finalAnswer,
+      updatedAt: run.updatedAt,
+    };
+  }
+
+  async getRunResult(runId: string): Promise<AgentRunResult | null> {
+    const run = await this.runRepo.findOne({ where: { id: runId } });
+    if (!run) {
+      return null;
+    }
+
+    const eventRows = await this.getRunEvents(runId);
+    const events: AgentEvent[] = eventRows.map((row) => ({
+      type: row.type,
+      payload: row.payload,
+      timestamp: row.createdAt.toISOString(),
+    }));
+
+    return {
+      runId: run.id,
+      domain: run.domain,
+      finalAnswer: run.finalAnswer ?? '',
+      events,
+    };
   }
 
   async getRunEvents(runId: string): Promise<AgentEventEntity[]> {
