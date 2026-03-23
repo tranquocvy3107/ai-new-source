@@ -1,0 +1,3 @@
+# Put Semrush authenticated cookie string here (single line), then copy to:
+# src/config/cookie-semrush.txt
+# or set SEMRUSH_COOKIE directly in .env
