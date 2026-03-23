@@ -32,7 +32,85 @@ export class LlmService {
       `${userPrompt}\nOutput must be valid JSON.`,
     );
 
-    const normalized = raw.replace(/^```json\s*/i, '').replace(/```$/i, '').trim();
-    return JSON.parse(normalized) as T;
+    const normalized = this.stripCodeFence(raw);
+    const direct = this.tryParseJson<T>(normalized);
+    if (direct !== null) {
+      return direct;
+    }
+
+    const extracted = this.extractFirstJsonObject(normalized);
+    const parsedExtracted = this.tryParseJson<T>(extracted);
+    if (parsedExtracted !== null) {
+      return parsedExtracted;
+    }
+
+    throw new Error(`Failed to parse JSON response: ${normalized.slice(0, 500)}`);
+  }
+
+  private stripCodeFence(value: string): string {
+    return value
+      .replace(/^```json\s*/i, '')
+      .replace(/^```\s*/i, '')
+      .replace(/\s*```$/i, '')
+      .trim();
+  }
+
+  private tryParseJson<T>(value: string): T | null {
+    const text = value.trim();
+    if (!text) {
+      return null;
+    }
+    try {
+      return JSON.parse(text) as T;
+    } catch {
+      return null;
+    }
+  }
+
+  private extractFirstJsonObject(value: string): string {
+    const start = value.indexOf('{');
+    if (start < 0) {
+      return '';
+    }
+
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    let end = -1;
+
+    for (let i = start; i < value.length; i += 1) {
+      const ch = value[i];
+      if (inString) {
+        if (escaped) {
+          escaped = false;
+        } else if (ch === '\\') {
+          escaped = true;
+        } else if (ch === '"') {
+          inString = false;
+        }
+        continue;
+      }
+
+      if (ch === '"') {
+        inString = true;
+        continue;
+      }
+
+      if (ch === '{') {
+        depth += 1;
+      } else if (ch === '}') {
+        depth -= 1;
+        if (depth === 0) {
+          end = i;
+          break;
+        }
+      }
+    }
+
+    if (end < 0) {
+      return value.slice(start).trim();
+    }
+
+    return value.slice(start, end + 1).trim();
   }
 }

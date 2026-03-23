@@ -105,12 +105,20 @@ export class AgentGraphService {
 
         let decision: AgentDecision;
         try {
-          decision = await this.llmService.generateJson<AgentDecision>(AGENT_SYSTEM_PROMPT, prompt);
+          const rawDecision = await this.llmService.generateJson<unknown>(AGENT_SYSTEM_PROMPT, prompt);
+          decision = this.normalizeDecision(rawDecision);
         } catch {
           decision = {
             thought: 'I cannot parse JSON planning output, I will finish with best available answer.',
             action: 'final',
-            finalAnswer: 'Agent planning parser failed. Please rerun with the same input.',
+            finalAnswer: JSON.stringify(
+              {
+                status: 'planner_parse_failed',
+                message: 'Agent planning parser failed. Please rerun with the same input.',
+              },
+              null,
+              2,
+            ),
           };
         }
 
@@ -182,20 +190,32 @@ export class AgentGraphService {
       .addNode('respond', async (state: AgentStateType) => {
         if (state.decision?.action === 'final' && state.decision.finalAnswer) {
           return {
-            finalAnswer: state.decision.finalAnswer,
+            finalAnswer: this.formatFinalAnswer(state.decision.finalAnswer),
           };
         }
 
-        const finalAnswer = await this.llmService.generateText(
-          'You are an AI agent summarizing execution in clear Vietnamese. Keep useful details and actionability.',
-          this.renderFinalResponsePrompt({
-            input: state.input,
-            domain: state.domain,
-            scratchpad: state.scratchpad.join('\n'),
-          }),
-        );
+        try {
+          const finalPayload = await this.llmService.generateJson<Record<string, unknown>>(
+            'You are an AI agent summarizing execution in clear Vietnamese. Keep useful details and actionability. Return strict JSON only.',
+            `${this.renderFinalResponsePrompt({
+              input: state.input,
+              domain: state.domain,
+              scratchpad: state.scratchpad.join('\n'),
+            })}\nOutput strict JSON only. Do not use markdown.`,
+          );
 
-        return { finalAnswer };
+          return { finalAnswer: this.formatFinalAnswer(finalPayload) };
+        } catch {
+          const fallback = await this.llmService.generateText(
+            'You are an AI agent summarizing execution in clear Vietnamese. Keep useful details and actionability.',
+            this.renderFinalResponsePrompt({
+              input: state.input,
+              domain: state.domain,
+              scratchpad: state.scratchpad.join('\n'),
+            }),
+          );
+          return { finalAnswer: this.formatFinalAnswer(fallback) };
+        }
       })
       .addEdge(START, 'bootstrap')
       .addEdge('bootstrap', 'plan')
@@ -396,5 +416,102 @@ export class AgentGraphService {
       .replace('{domain}', input.domain)
       .replace('{scratchpad}', input.scratchpad || 'No scratchpad yet.')
       .replace('{resultFormat}', AFFILIATE_RESULT_FORMAT.trim());
+  }
+
+  private normalizeDecision(rawDecision: unknown): AgentDecision {
+    const parsed =
+      rawDecision && typeof rawDecision === 'object'
+        ? (rawDecision as Record<string, unknown>)
+        : {};
+    const thought = this.asText(parsed.thought, 'I will continue with best available strategy.');
+    const action = parsed.action === 'tool' || parsed.action === 'final' ? parsed.action : 'final';
+    const toolName = this.asText(parsed.toolName);
+    const toolInput = this.asText(parsed.toolInput);
+    const finalAnswer = this.asText(parsed.finalAnswer);
+
+    if (action === 'tool') {
+      if (!toolName) {
+        return {
+          thought: `${thought} Tool name was missing, so I will finalize with current context.`,
+          action: 'final',
+          finalAnswer: JSON.stringify(
+            {
+              status: 'invalid_tool_decision',
+              message: 'Tool action was selected but toolName is missing.',
+            },
+            null,
+            2,
+          ),
+        };
+      }
+
+      return {
+        thought,
+        action: 'tool',
+        toolName,
+        toolInput,
+      };
+    }
+
+    return {
+      thought,
+      action: 'final',
+      finalAnswer:
+        finalAnswer ||
+        JSON.stringify(
+          {
+            status: 'completed_without_final_text',
+            message: 'Planner selected final action without finalAnswer text.',
+          },
+          null,
+          2,
+        ),
+    };
+  }
+
+  private asText(value: unknown, fallback = ''): string {
+    if (typeof value === 'string') {
+      const trimmed = value.trim();
+      return trimmed || fallback;
+    }
+    if (value && typeof value === 'object') {
+      try {
+        return JSON.stringify(value, null, 2);
+      } catch {
+        return fallback;
+      }
+    }
+    if (typeof value === 'number' || typeof value === 'boolean') {
+      return String(value);
+    }
+    return fallback;
+  }
+
+  private formatFinalAnswer(value: unknown): string {
+    if (typeof value === 'string') {
+      const trimmed = value.trim();
+      if (!trimmed) {
+        return JSON.stringify({ summary: 'No final answer generated.' }, null, 2);
+      }
+      const maybeJson = this.tryParseJsonText(trimmed);
+      if (maybeJson !== null) {
+        return JSON.stringify(maybeJson, null, 2);
+      }
+      return JSON.stringify({ summary: trimmed }, null, 2);
+    }
+
+    if (value && typeof value === 'object') {
+      return JSON.stringify(value, null, 2);
+    }
+
+    return JSON.stringify({ summary: String(value ?? '') }, null, 2);
+  }
+
+  private tryParseJsonText(value: string): unknown | null {
+    try {
+      return JSON.parse(value);
+    } catch {
+      return null;
+    }
   }
 }

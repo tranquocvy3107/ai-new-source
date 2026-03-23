@@ -4,96 +4,162 @@ import * as cheerio from 'cheerio';
 import { AgentTool } from './tool.types';
 import { ToolExecutionResult } from '../agent';
 
-type ResultType = 'affiliate' | 'pricing' | 'official' | 'login';
+interface UrlSearchInput {
+  query?: string;
+}
 
-interface SearchResult {
+interface SimpleSearchResult {
+  rank: number;
   title: string;
   link: string;
-  snippet: string;
-  type: ResultType;
+  description: string;
 }
 
 @Injectable()
 export class UrlSearchTool implements AgentTool {
   readonly name = 'url_search';
-  readonly description = 'Simple URL search for domain research';
+  readonly description = 'Simple Bing RSS search tool (top 5 results).';
 
   async execute(input: string, domain: string): Promise<ToolExecutionResult> {
-    const targetDomain = this.detectDomain(input) || this.normalizeDomain(domain);
+    const query = this.resolveQuery(input, domain);
+    if (!query) {
+      return {
+        ok: false,
+        output: JSON.stringify(
+          {
+            tool: 'url_search',
+            provider: 'bing_rss',
+            query: '',
+            total: 0,
+            results: [],
+            error: 'Empty query',
+          },
+          null,
+          2,
+        ),
+      };
+    }
 
-    const query = `${targetDomain} affiliate program`;
-    const results = await this.search(query);
+    const endpoint = `https://www.bing.com/search?format=rss&q=${encodeURIComponent(query)}&mkt=en-US&setlang=en-US`;
 
-    // filter đúng domain + loại rác
-    const filtered = results.filter((r) =>
-      this.isValidResult(r.link, targetDomain),
-    );
+    try {
+      const response = await axios.get<string>(endpoint, {
+        timeout: 30000,
+        headers: {
+          'User-Agent':
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36',
 
-    const mapped: SearchResult[] = filtered.map((r) => ({
-      ...r,
-      type: this.classify(r.link),
-    }));
+          'Accept-Language': 'en-US,en;q=0.9',
 
-    return {
-      ok: true,
-      output: JSON.stringify({
-        affiliateCandidates: mapped.filter((r) => r.type === 'affiliate'),
-        officialPages: mapped.filter((r) => r.type === 'official'),
-        other: mapped.filter((r) => r.type === 'pricing'),
-      }, null, 2),
-    };
+          'Referer': 'https://www.bing.com/',
+
+          'Cache-Control': 'no-cache',
+        },
+      });
+
+      const results = this.parseRssItems(response.data);
+      return {
+        ok: true,
+        output: JSON.stringify(
+          {
+            tool: 'url_search',
+            provider: 'bing_rss',
+            query,
+            total: results.length,
+            results,
+          },
+          null,
+          2,
+        ),
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      return {
+        ok: false,
+        output: JSON.stringify(
+          {
+            tool: 'url_search',
+            provider: 'bing_rss',
+            query,
+            total: 0,
+            results: [],
+            error: `Bing RSS request failed: ${message}`,
+          },
+          null,
+          2,
+        ),
+      };
+    }
   }
 
-  // ================= SEARCH =================
+  private parseRssItems(xml: string): SimpleSearchResult[] {
+    const $ = cheerio.load(xml, { xmlMode: true });
+    const results: SimpleSearchResult[] = [];
+    const seen = new Set<string>();
 
-  private async search(query: string) {
-    const url = `https://www.bing.com/search?format=rss&q=${encodeURIComponent(query)}`;
-
-    const res = await axios.get(url);
-    const $ = cheerio.load(res.data, { xmlMode: true });
-
-    const results: any[] = [];
-
-    $('item').each((_, el) => {
-      const title = $(el).find('title').text().trim();
-      const link = $(el).find('link').text().trim();
-      const snippet = $(el).find('description').text().trim();
-
-      if (title && link) {
-        results.push({ title, link, snippet });
+    $('item').each((_, item) => {
+      if (results.length >= 5) {
+        return;
       }
+
+      const title = this.clean($(item).find('title').text());
+      const link = this.clean($(item).find('link').text());
+      const description = this.clean($(item).find('description').text());
+
+      if (!title || !link || !this.isHttpUrl(link) || seen.has(link)) {
+        return;
+      }
+
+      seen.add(link);
+      results.push({
+        rank: results.length + 1,
+        title,
+        link,
+        description,
+      });
     });
 
     return results;
   }
 
-  // ================= LOGIC =================
+  private resolveQuery(input: string, domain: string): string {
+    const parsed = this.parseJsonInput(input);
+    const raw = this.clean(parsed.query ?? input);
+    if (raw) {
+      return raw;
+    }
 
-  private classify(link: string): ResultType {
-    const l = link.toLowerCase();
+    const cleanDomain = this.clean(domain)
+      .replace(/^https?:\/\//i, '')
+      .replace(/^www\./i, '')
+      .split('/')[0];
 
-    if (l.includes('affiliate') || l.includes('partner')) return 'affiliate';
-    if (l.includes('pricing') || l.includes('plan')) return 'pricing';
-    if (l.includes('login') || l.includes('dashboard')) return 'login';
+    if (!cleanDomain) {
+      return '';
+    }
 
-    return 'official';
+    return `${cleanDomain} affiliate program`;
   }
 
-  private isValidResult(link: string, domain: string): boolean {
-    if (!link.includes(domain)) return false;
+  private parseJsonInput(input: string): UrlSearchInput {
+    const text = input.trim();
+    if (!text.startsWith('{')) {
+      return {};
+    }
 
-    const bad = ['zhihu', 'reddit', 'facebook', 'twitter'];
-    if (bad.some((d) => link.includes(d))) return false;
-
-    return true;
+    try {
+      const parsed = JSON.parse(text) as UrlSearchInput;
+      return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch {
+      return {};
+    }
   }
 
-  private detectDomain(input: string): string {
-    const match = input.match(/([a-z0-9.-]+\.[a-z]{2,})/i);
-    return this.normalizeDomain(match?.[1] ?? '');
+  private clean(value: string): string {
+    return value.replace(/\s+/g, ' ').trim();
   }
 
-  private normalizeDomain(domain: string): string {
-    return domain.replace(/^www\./, '').toLowerCase();
+  private isHttpUrl(value: string): boolean {
+    return /^https?:\/\/.+/i.test(value);
   }
 }

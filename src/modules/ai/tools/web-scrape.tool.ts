@@ -5,6 +5,8 @@ import * as cheerio from 'cheerio';
 import { AgentTool } from './tool.types';
 import { ToolExecutionResult } from '../agent';
 
+type LoadedDocument = ReturnType<typeof cheerio.load>;
+
 @Injectable()
 export class WebScrapeTool implements AgentTool {
   readonly name = 'web_scrape';
@@ -14,7 +16,7 @@ export class WebScrapeTool implements AgentTool {
 
   async execute(input: string, _domain: string): Promise<ToolExecutionResult> {
     const timeout = this.configService.get<number>('REQUEST_TIMEOUT_MS', 30000);
-    const response = await axios.get(input, {
+    const response = await axios.get<string>(input, {
       timeout,
       headers: {
         'User-Agent':
@@ -23,16 +25,81 @@ export class WebScrapeTool implements AgentTool {
     });
 
     const $ = cheerio.load(response.data);
+    this.removeNoise($);
+
     const title = $('title').first().text().trim();
-    const bodyText = $('body').text().replace(/\s+/g, ' ').trim();
-    const excerpt = bodyText.slice(0, 3500);
+    const contentRoot = this.pickContentRoot($);
+    const text = this.extractReadableText($, contentRoot);
+    const excerpt = text.slice(0, 4200);
+    const isTruncated = text.length > excerpt.length;
 
     return {
       ok: true,
       output: `Title: ${title}\nURL: ${input}\nContent: ${excerpt}`,
       metadata: {
-        length: bodyText.length,
+        extractedFrom: contentRoot,
+        length: text.length,
+        truncated: isTruncated,
       },
     };
+  }
+
+  private removeNoise($: LoadedDocument): void {
+    $(
+      [
+        'script',
+        'style',
+        'noscript',
+        'template',
+        'iframe',
+        'svg',
+        'canvas',
+        'form',
+        'nav',
+        'footer',
+      ].join(','),
+    ).remove();
+  }
+
+  private pickContentRoot($: LoadedDocument): string {
+    const preferred = ['main', 'article', '[role="main"]', '#content', '.content', '.main-content'];
+
+    for (const selector of preferred) {
+      const candidate = $(selector).first();
+      const text = this.normalizeText(candidate.text());
+      if (candidate.length > 0 && text.length >= 180) {
+        return selector;
+      }
+    }
+
+    return 'body';
+  }
+
+  private extractReadableText($: LoadedDocument, rootSelector: string): string {
+    const root = $(rootSelector).first();
+    const blocks: string[] = [];
+    const seen = new Set<string>();
+
+    root.find('h1,h2,h3,p,li,dt,dd,blockquote').each((_, el) => {
+      const text = this.normalizeText($(el).text());
+      if (text.length < 25) {
+        return;
+      }
+      if (seen.has(text)) {
+        return;
+      }
+      seen.add(text);
+      blocks.push(text);
+    });
+
+    if (blocks.length === 0) {
+      return this.normalizeText(root.text());
+    }
+
+    return blocks.join('\n');
+  }
+
+  private normalizeText(value: string): string {
+    return value.replace(/\s+/g, ' ').trim();
   }
 }

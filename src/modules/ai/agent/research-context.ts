@@ -19,14 +19,46 @@ Research checklist:
 `;
 
 export const AFFILIATE_RESULT_FORMAT = `
-When finishing, produce concise markdown with sections:
-1) Domain Snapshot
-2) Affiliate Program
-3) Products and Pricing
-4) Commission and Economics
-5) Referral Link and Tracking Notes
-6) Traffic and Quality Signals
-7) Evaluation Criteria and Verdict (PASS/FAIL)
-8) Google Ads Ready Data
-9) Unknowns and Next Data to Collect
+When finishing, produce strict JSON object with this shape:
+{
+  "domain": "string",
+  "domain_snapshot": "string",
+  "affiliate_program": {
+    "found": true,
+    "official_url": "string",
+    "notes": "string"
+  },
+  "products_pricing": {
+    "products": ["string"],
+    "pricing_notes": "string"
+  },
+  "commission_economics": {
+    "model": "string",
+    "rate": "string",
+    "cookie_duration": "string",
+    "payout_notes": "string"
+  },
+  "referral_tracking": {
+    "referral_link": "string",
+    "tracking_notes": "string"
+  },
+  "traffic_quality_signals": {
+    "signals": ["string"],
+    "confidence": "low|medium|high"
+  },
+  "evaluation": {
+    "score": 0,
+    "verdict": "PASS|FAIL",
+    "reasons": ["string"]
+  },
+  "google_ads_ready_data": {
+    "offers": ["string"],
+    "audience_angles": ["string"],
+    "keywords": ["string"],
+    "ad_copy_angles": ["string"],
+    "landing_page_notes": ["string"],
+    "compliance_risk_notes": ["string"]
+  },
+  "unknowns_next_steps": ["string"]
+}
 `;
