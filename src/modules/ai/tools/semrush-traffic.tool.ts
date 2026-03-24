@@ -3,8 +3,12 @@ import { ConfigService } from '@nestjs/config';
 import axios from 'axios';
 import * as cheerio from 'cheerio';
 import { existsSync, readFileSync } from 'fs';
+import { v4 as uuidv4 } from 'uuid';
 import { AgentTool } from './tool.types';
 import { ToolExecutionResult } from '../agent';
+
+const UA =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/146.0.0.0 Safari/537.36';
 
 interface SemrushCredentials {
   userId: number;
@@ -14,318 +18,235 @@ interface SemrushCredentials {
 @Injectable()
 export class SemrushTrafficTool implements AgentTool {
   readonly name = 'semrush_traffic';
+
   readonly description =
-    'Get domain traffic/authority signals from Semrush overview (requires Semrush authenticated cookie).';
+    'Get full domain traffic, authority, competitors and AI signals from Semrush via RPC';
 
   constructor(private readonly configService: ConfigService) {}
 
+
   async execute(input: string, domain: string): Promise<ToolExecutionResult> {
-    const targetDomain = this.normalizeDomain(input || domain);
-    if (!targetDomain) {
-      return {
-        ok: false,
-        output: 'Invalid domain for semrush_traffic.',
-      };
-    }
+    const cleanDomain = this.normalizeDomain(input || domain);
+    if (!cleanDomain) return { ok: false, output: 'Invalid domain' };
 
-    const cookie = this.loadSemrushCookie();
-    if (!cookie) {
-      return {
-        ok: false,
-        output:
-          'Semrush cookie is missing. Set `SEMRUSH_COOKIE` or provide file path in `SEMRUSH_COOKIE_FILE`.',
-      };
-    }
+    const cookie = this.loadCookie();
+    if (!cookie) return { ok: false, output: 'Missing cookie' };
 
-    const timeout = this.configService.get<number>('REQUEST_TIMEOUT_MS', 30000);
-    const overviewUrl = `https://www.semrush.com/analytics/overview/?q=${encodeURIComponent(targetDomain)}&searchType=domain`;
-    const headers = this.buildBrowserHeaders(cookie, 'https://www.semrush.com/');
-
-    const pageResponse = await axios.get(overviewUrl, {
-      timeout,
-      headers,
-      maxRedirects: 5,
-      validateStatus: () => true,
-    });
-
-    if (pageResponse.status >= 400) {
-      return {
-        ok: false,
-        output: `Semrush page request failed: HTTP ${pageResponse.status}`,
-        metadata: {
-          domain: targetDomain,
-          status: pageResponse.status,
-        },
-      };
-    }
-
-    const html = String(pageResponse.data ?? '');
-    const credentials = this.extractInternalCredentials(html);
-
-    const rpcData = credentials
-      ? await this.fetchSemrushRpcData(targetDomain, overviewUrl, cookie, credentials, timeout)
-      : null;
-    const htmlFallback = this.extractFromOverviewHtml(html);
-
-    const result = {
-      domain: targetDomain,
-      source: credentials ? 'semrush_rpc' : 'semrush_html',
-      overviewUrl,
-      traffic: rpcData?.traffic ?? htmlFallback.traffic,
-      authority: rpcData?.authority ?? htmlFallback.authority,
-      trend: rpcData?.trend ?? [],
-      notes: [
-        ...(rpcData?.notes ?? []),
-        ...(htmlFallback.notes ?? []),
-      ].filter(Boolean),
-    };
-
-    return {
-      ok: true,
-      output: JSON.stringify(result, null, 2),
-      metadata: {
-        domain: targetDomain,
-        source: result.source,
-        hasTraffic: Boolean(result.traffic),
-        hasAuthority: Boolean(result.authority),
-      },
-    };
-  }
-
-  private buildBrowserHeaders(cookie: string, referer?: string): Record<string, string> {
-    return {
-      'User-Agent':
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-      Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-      'Accept-Language': 'en-US,en;q=0.9',
-      Cookie: cookie,
-      Referer: referer ?? 'https://www.semrush.com/analytics/overview/',
-      'X-Requested-With': 'XMLHttpRequest',
-    };
-  }
-
-  private loadSemrushCookie(): string {
-    const envCookie = this.configService.get<string>('SEMRUSH_COOKIE', '').trim();
-    if (envCookie) {
-      return envCookie;
-    }
-
-    const cookiePath = this.configService.get<string>(
-      'SEMRUSH_COOKIE_FILE',
-      'src/config/cookie-semrush.txt',
-    );
-    if (!existsSync(cookiePath)) {
-      return '';
-    }
-    return readFileSync(cookiePath, 'utf8').trim();
-  }
-
-  private extractInternalCredentials(html: string): SemrushCredentials | null {
-    const match = html.match(/window\.sm2\.user\s*=\s*(\{[\s\S]+?\});/);
-    if (!match) {
-      return null;
-    }
+    const overviewUrl = `https://www.semrush.com/analytics/overview/?q=${cleanDomain}&searchType=domain`;
 
     try {
-      const parsed = JSON.parse(match[1]) as { id?: number; api_key?: string };
-      if (!parsed.id || !parsed.api_key) {
-        return null;
+      const html = await this.fetchHtml(overviewUrl, cookie);
+      const creds = this.extractCreds(html);
+
+      let parsed: any = {};
+
+      if (creds) {
+        parsed = await this.fetchRpc(cleanDomain, overviewUrl, cookie, creds);
       }
+
+      // fallback riêng traffic
+      if (!parsed.traffic?.organicTraffic) {
+        const fallback = this.extractHtmlFallback(html);
+        parsed.traffic = { ...fallback.traffic, ...parsed.traffic };
+      }
+
       return {
-        userId: parsed.id,
-        apiKey: parsed.api_key,
+        ok: true,
+        output: {
+          domain: cleanDomain,
+          source: {
+            name: 'semrush',
+            url: overviewUrl,
+            method: creds ? 'rpc' : 'html',
+          },
+          dbStatus: 'created',
+          ...parsed,
+        },
       };
-    } catch {
-      return null;
+    } catch (err: any) {
+      return { ok: false, output: err.message };
     }
   }
 
-  private async fetchSemrushRpcData(
+  // ================= RPC =================
+  private async fetchRpc(
     domain: string,
-    overviewUrl: string,
+    referer: string,
     cookie: string,
-    credentials: SemrushCredentials,
-    timeout: number,
-  ): Promise<{
-    traffic?: Record<string, number>;
-    authority?: Record<string, number>;
-    trend?: Array<{ date: string; organic?: number; paid?: number }>;
-    notes?: string[];
-  } | null> {
+    creds: SemrushCredentials,
+  ) {
+    const requestId = uuidv4();
+
     const payload = [
-      {
-        id: 1,
-        jsonrpc: '2.0',
-        method: 'organic.Summary',
-        params: {
-          report: 'domain.overview',
-          args: {
-            searchItem: domain,
-            searchType: 'domain',
-            database: 'us',
-            dateType: 'daily',
-          },
-          userId: credentials.userId,
-          apiKey: credentials.apiKey,
-        },
-      },
-      {
-        id: 2,
-        jsonrpc: '2.0',
-        method: 'backlinks.Summary',
-        params: {
-          report: 'domain.overview',
-          args: {
-            searchItem: domain,
-            searchType: 'domain',
-          },
-          userId: credentials.userId,
-          apiKey: credentials.apiKey,
-        },
-      },
-      {
-        id: 3,
-        jsonrpc: '2.0',
-        method: 'organic.OverviewTrend',
-        params: {
-          report: 'domain.overview',
-          args: {
-            dateType: 'monthly',
-            searchItem: domain,
-            searchType: 'domain',
-            database: 'us',
-          },
-          userId: credentials.userId,
-          apiKey: credentials.apiKey,
-        },
-      },
+      this.buildRpc(1, 'organic.Summary', domain, creds, requestId),
+      this.buildRpc(2, 'backlinks.Summary', domain, creds, requestId),
+      this.buildRpc(3, 'organic.AiSeoSummary', domain, creds, requestId),
+      this.buildRpc(4, 'organic.OverviewTrend', domain, creds, requestId),
+      this.buildRpc(5, 'organic.CompetitorsOverview', domain, creds, requestId),
+      this.buildRpc(6, 'organic.AiTopSources', domain, creds, requestId),
     ];
 
-    const rpcResponse = await axios.post('https://www.semrush.com/dpa/rpc', payload, {
-      timeout,
-      headers: {
-        'User-Agent':
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-        'Content-Type': 'application/json',
-        Cookie: cookie,
-        Referer: overviewUrl,
-        'X-Requested-With': 'XMLHttpRequest',
+    const res = await axios.post(
+      'https://www.semrush.com/dpa/rpc',
+      payload,
+      {
+        headers: {
+          'User-Agent': UA,
+          'Content-Type': 'application/json',
+          Cookie: cookie,
+          Referer: referer,
+          'X-Requested-With': 'XMLHttpRequest',
+        },
       },
-      validateStatus: () => true,
-    });
+    );
 
-    if (rpcResponse.status >= 400 || !Array.isArray(rpcResponse.data)) {
-      return null;
-    }
+    if (!Array.isArray(res.data)) return {};
 
-    const output: {
-      traffic?: Record<string, number>;
-      authority?: Record<string, number>;
-      trend?: Array<{ date: string; organic?: number; paid?: number }>;
-      notes?: string[];
-    } = {};
+    const out: any = {};
 
-    for (const item of rpcResponse.data as Array<Record<string, unknown>>) {
-      const id = item.id as number | undefined;
-      const result = item.result as Record<string, unknown> | undefined;
-      const error = item.error as { message?: string } | undefined;
+    for (const item of res.data) {
+      // ===== TRAFFIC =====
+      if (item.id === 1 && Array.isArray(item.result)) {
+        const best =
+          item.result.find((r: any) => r.database === 'us') ||
+          item.result.find((r: any) => r.organicTraffic) ||
+          item.result[0];
 
-      if (error?.message) {
-        output.notes = [...(output.notes ?? []), error.message];
-      }
-
-      if (id === 1 && Array.isArray(result)) {
-        const best = (result[0] ?? {}) as Record<string, number>;
-        output.traffic = {
-          organicTraffic: Number(best.organicTraffic ?? 0),
-          paidTraffic: Number(best.adwordsTraffic ?? 0),
-          trafficCost: Number(best.organicTrafficCost ?? 0),
-          rank: Number(best.rank ?? 0),
-        };
-      }
-
-      if (id === 2 && result) {
-        output.authority = {
-          authorityScore: Number(result.authorityScore ?? 0),
-          backlinks: Number(result.backlinks ?? 0),
-          referringDomains: Number(result.referringDomains ?? 0),
-        };
-      }
-
-      if (id === 3 && result && Array.isArray(result.history)) {
-        output.trend = result.history.map((point) => {
-          const data = point as Record<string, unknown>;
-          return {
-            date: String(data.date ?? ''),
-            organic: Number(data.organicTraffic ?? 0),
-            paid: Number(data.adwordsTraffic ?? 0),
+        if (best) {
+          out.traffic = {
+            organicTraffic: best.organicTraffic,
+            organicPositions: best.organicPositions,
+            organicTrafficBranded: best.organicTrafficBranded,
+            organicTrafficNonBranded: best.organicTrafficNonBranded,
+            organicTrafficCost: best.organicTrafficCost,
+            adwordsTraffic: best.adwordsTraffic,
+            adwordsPositions: best.adwordsPositions,
+            adwordsTrafficCost: best.adwordsTrafficCost,
+            totalTraffic:
+              (best.organicTraffic || 0) +
+              (best.adwordsTraffic || 0),
+            semrushRank: best.rank,
           };
-        });
+        }
+      }
+
+      // ===== AUTHORITY =====
+      if (item.id === 2 && item.result) {
+        out.authority = {
+          authorityScore: item.result.authorityScore,
+          backlinks: item.result.backlinks,
+          referringDomains: item.result.referringDomains,
+          domainHealth: item.result.health,
+          linkPower: item.result.linkPower,
+          naturalness: item.result.naturalness,
+        };
+      }
+
+      // ===== AI =====
+      if (item.id === 3 && item.result) {
+        out.aiOverview = {
+          visibility: item.result.ai_visibility,
+          citedPages: item.result.cited_pages,
+        };
+      }
+
+      if (item.id === 4 && item.result?.history) {
+        out.trendData = item.result.history;
+      }
+
+      if (item.id === 5 && item.result) {
+        out.competitors = item.result;
+      }
+
+      if (item.id === 6 && item.result) {
+        out.aiSources = item.result;
       }
     }
 
-    return output;
+    return out;
   }
 
-  private extractFromOverviewHtml(html: string): {
-    traffic?: Record<string, number>;
-    authority?: Record<string, number>;
-    notes: string[];
-  } {
-    const $ = cheerio.load(html);
-    const text = $('body').text().replace(/\s+/g, ' ');
-
-    const notes: string[] = [];
-    const authorityScore = this.pickFirstNumber(
-      text.match(/Authority\s*Score[^0-9]{0,20}([0-9.,]+)/i)?.[1],
-    );
-    const organicTraffic = this.pickFirstNumber(
-      text.match(/Organic\s*Traffic[^0-9]{0,20}([0-9.,KMkmb]+)/i)?.[1],
-    );
-
-    if (!authorityScore) {
-      notes.push('Authority score not confidently parsed from HTML.');
-    }
-    if (!organicTraffic) {
-      notes.push('Organic traffic not confidently parsed from HTML.');
-    }
-
+  private buildRpc(
+    id: number,
+    method: string,
+    domain: string,
+    creds: SemrushCredentials,
+    requestId: string,
+  ) {
     return {
-      authority: authorityScore ? { authorityScore } : undefined,
-      traffic: organicTraffic ? { organicTraffic } : undefined,
-      notes,
+      id,
+      jsonrpc: '2.0',
+      method,
+      params: {
+        request_id: requestId,
+        report: 'domain.overview',
+        args: {
+          searchItem: domain,
+          searchType: 'domain',
+          database: 'us',
+          dateFormat: 'date', // 🔥 FIX QUAN TRỌNG
+          dateType: 'daily',  // 🔥 FIX QUAN TRỌNG
+        },
+        userId: creds.userId,
+        apiKey: creds.apiKey,
+      },
     };
   }
 
-  private pickFirstNumber(raw?: string): number {
-    if (!raw) {
-      return 0;
-    }
-    const value = raw.trim().toUpperCase().replace(/,/g, '');
-    if (!value) {
-      return 0;
-    }
-    const base = Number(value.replace(/[KMB]/g, ''));
-    if (Number.isNaN(base)) {
-      return 0;
-    }
-    if (value.endsWith('K')) {
-      return base * 1_000;
-    }
-    if (value.endsWith('M')) {
-      return base * 1_000_000;
-    }
-    if (value.endsWith('B')) {
-      return base * 1_000_000_000;
-    }
-    return base;
+  // ================= HTML =================
+  private extractHtmlFallback(html: string) {
+    const $ = cheerio.load(html);
+    const text = $('body').text();
+
+    const match = text.match(/Organic Traffic\s*([\d,.KMB]+)/i);
+
+    return {
+      traffic: match
+        ? { organicTraffic: this.parseNumber(match[1]) }
+        : {},
+    };
   }
 
-  private normalizeDomain(input: string): string {
-    const value = input.trim();
-    if (!value) {
-      return '';
-    }
-    return value.replace(/^https?:\/\//i, '').replace(/\/.*$/, '').toLowerCase();
+  // ================= HELPERS =================
+  private async fetchHtml(url: string, cookie: string) {
+    const res = await axios.get(url, {
+      headers: {
+        'User-Agent': UA,
+        Cookie: cookie,
+      },
+    });
+    return res.data;
+  }
+
+  private extractCreds(html: string): SemrushCredentials | null {
+    const m = html.match(/window\.sm2\.user\s*=\s*(\{[\s\S]+?\});/);
+    if (!m) return null;
+    const p = JSON.parse(m[1]);
+    return { userId: p.id, apiKey: p.api_key };
+  }
+
+  private loadCookie() {
+    const file = this.configService.get<string>(
+      'SEMRUSH_COOKIE_FILE',
+      'cookie.txt',
+    );
+    if (!existsSync(file)) return '';
+    return readFileSync(file, 'utf8').trim();
+  }
+
+  private normalizeDomain(input: string) {
+    return input
+      .replace(/^https?:\/\//, '')
+      .replace(/\/.*$/, '')
+      .toLowerCase();
+  }
+
+  private parseNumber(raw: string): number {
+    const v = raw.toUpperCase().replace(/,/g, '');
+    const n = Number(v.replace(/[KMB]/g, ''));
+    if (v.endsWith('K')) return n * 1e3;
+    if (v.endsWith('M')) return n * 1e6;
+    if (v.endsWith('B')) return n * 1e9;
+    return n;
   }
 }

@@ -46,15 +46,16 @@ export class UrlSearchTool implements AgentTool {
       const response = await axios.get<string>(endpoint, {
         timeout: 30000,
         headers: {
-          'User-Agent':
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36',
-
-          'Accept-Language': 'vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7',
-
-          'Referer': 'https://www.bing.com/',
-
-          'Cache-Control': 'no-cache',
-        },
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36', // UA mới hơn
+  'Accept': 'application/rss+xml, application/xml, text/xml, */*',
+  'Accept-Language': 'en-US,en;q=0.9,vi;q=0.8',
+  'Referer': 'https://www.bing.com/',
+  'Sec-Fetch-Site': 'same-origin',
+  'Sec-Fetch-Mode': 'navigate',
+  'Sec-Fetch-Dest': 'document',
+  'Cache-Control': 'no-cache',
+  'Pragma': 'no-cache'
+}
       });
 
       const results = this.parseRssItems(response.data);
