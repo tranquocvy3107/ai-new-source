@@ -4,6 +4,8 @@ import { ToolExecutionResult } from '../agent';
 
 interface UrlSearchInput {
   query?: string;
+  engines?: string[];
+  limit?: number;
 }
 
 interface SimpleSearchResult {
@@ -19,13 +21,20 @@ interface OpenWebSearchEngineResult {
   description?: unknown;
 }
 
+type SearchEngine = 'duckduckgo' | 'bing' | 'brave' | 'exa';
+type SearchFn = (query: string, limit: number) => Promise<unknown>;
+
 @Injectable()
 export class UrlSearchTool implements AgentTool {
   readonly name = 'url_search';
-  readonly description = 'Web search powered by open-websearch engine.';
+  readonly description = 'Web search powered by open-websearch with multi-engine fallback.';
 
   async execute(input: string, domain: string): Promise<ToolExecutionResult> {
+    const parsedInput = this.parseJsonInput(input);
     const query = this.resolveQuery(input, domain);
+    const desiredLimit = this.resolveLimit(parsedInput.limit);
+    const requestedEngines = this.resolveEngines(parsedInput.engines);
+
     if (!query) {
       return {
         ok: false,
@@ -34,6 +43,7 @@ export class UrlSearchTool implements AgentTool {
             tool: 'url_search',
             provider: 'open_websearch',
             query: '',
+            engines: requestedEngines,
             total: 0,
             results: [],
             error: 'Empty query',
@@ -45,17 +55,22 @@ export class UrlSearchTool implements AgentTool {
     }
 
     try {
-      const results = await this.searchWithOpenWebSearch(query);
+      const searchResult = await this.searchWithOpenWebSearch(query, requestedEngines, desiredLimit);
       return {
-        ok: true,
+        ok: searchResult.results.length > 0,
         output: JSON.stringify(
           {
             tool: 'url_search',
             provider: 'open_websearch',
-            engine: 'duckduckgo',
+            engine: searchResult.usedEngine ?? requestedEngines[0],
             query,
-            total: results.length,
-            results,
+            engines: requestedEngines,
+            attemptedEngines: searchResult.attemptedEngines,
+            total: searchResult.results.length,
+            results: searchResult.results,
+            ...(searchResult.results.length === 0
+              ? { error: 'No results from configured engines (possibly rate-limited/blocked).' }
+              : {}),
           },
           null,
           2,
@@ -69,8 +84,9 @@ export class UrlSearchTool implements AgentTool {
           {
             tool: 'url_search',
             provider: 'open_websearch',
-            engine: 'duckduckgo',
+            engine: requestedEngines[0],
             query,
+            engines: requestedEngines,
             total: 0,
             results: [],
             error: `open-websearch request failed: ${message}`,
@@ -82,35 +98,32 @@ export class UrlSearchTool implements AgentTool {
     }
   }
 
-  private async searchWithOpenWebSearch(query: string): Promise<SimpleSearchResult[]> {
-    const searchDuckDuckGo = await this.loadDuckduckgoEngine();
-    const rawResults = (await searchDuckDuckGo(query, 5)) as OpenWebSearchEngineResult[];
-    const results: SimpleSearchResult[] = [];
-    const seen = new Set<string>();
+  private async searchWithOpenWebSearch(
+    query: string,
+    engines: SearchEngine[],
+    limit: number,
+  ): Promise<{ results: SimpleSearchResult[]; attemptedEngines: SearchEngine[]; usedEngine: SearchEngine | null }> {
+    const attemptedEngines: SearchEngine[] = [];
 
-    rawResults.forEach((item) => {
-      if (results.length >= 5) {
-        return;
+    for (const engine of engines) {
+      attemptedEngines.push(engine);
+      const searchFn = await this.loadEngine(engine);
+      const raw = await searchFn(query, limit);
+      const normalized = this.normalizeResults(raw, limit);
+      if (normalized.length > 0) {
+        return {
+          results: normalized,
+          attemptedEngines,
+          usedEngine: engine,
+        };
       }
+    }
 
-      const title = this.clean(this.toText(item.title));
-      const link = this.clean(this.toText(item.url));
-      const description = this.clean(this.toText(item.description));
-
-      if (!title || !link || !this.isHttpUrl(link) || seen.has(link)) {
-        return;
-      }
-
-      seen.add(link);
-      results.push({
-        rank: results.length + 1,
-        title,
-        link,
-        description,
-      });
-    });
-
-    return results;
+    return {
+      results: [],
+      attemptedEngines,
+      usedEngine: null,
+    };
   }
 
   private resolveQuery(input: string, domain: string): string {
@@ -158,17 +171,95 @@ export class UrlSearchTool implements AgentTool {
     return typeof value === 'string' ? value : '';
   }
 
-  private async loadDuckduckgoEngine(): Promise<(query: string, limit: number) => Promise<unknown>> {
+  private async loadEngine(engine: SearchEngine): Promise<SearchFn> {
     const dynamicImport = new Function('specifier', 'return import(specifier)') as (
       specifier: string,
     ) => Promise<Record<string, unknown>>;
-    const module = await dynamicImport('open-websearch/build/engines/duckduckgo/searchDuckDuckGo.js');
-    const fn = module.searchDuckDuckGo;
+    const entrypoints: Record<SearchEngine, { path: string; fn: string }> = {
+      duckduckgo: {
+        path: 'open-websearch/build/engines/duckduckgo/searchDuckDuckGo.js',
+        fn: 'searchDuckDuckGo',
+      },
+      bing: {
+        path: 'open-websearch/build/engines/bing/bing.js',
+        fn: 'searchBing',
+      },
+      brave: {
+        path: 'open-websearch/build/engines/brave/brave.js',
+        fn: 'searchBrave',
+      },
+      exa: {
+        path: 'open-websearch/build/engines/exa/exa.js',
+        fn: 'searchExa',
+      },
+    };
+    const target = entrypoints[engine];
+    const module = await dynamicImport(target.path);
+    const fn = module[target.fn];
 
     if (typeof fn !== 'function') {
-      throw new Error('Cannot load searchDuckDuckGo from open-websearch');
+      throw new Error(`Cannot load ${target.fn} from open-websearch`);
     }
 
-    return fn as (query: string, limit: number) => Promise<unknown>;
+    return fn as SearchFn;
+  }
+
+  private normalizeResults(raw: unknown, limit: number): SimpleSearchResult[] {
+    if (!Array.isArray(raw)) {
+      return [];
+    }
+
+    const results: SimpleSearchResult[] = [];
+    const seen = new Set<string>();
+
+    for (const item of raw as OpenWebSearchEngineResult[]) {
+      if (results.length >= limit) {
+        break;
+      }
+
+      const title = this.clean(this.toText(item.title));
+      const link = this.clean(this.toText(item.url));
+      const description = this.clean(this.toText(item.description));
+
+      if (!title || !link || !this.isHttpUrl(link) || seen.has(link)) {
+        continue;
+      }
+
+      seen.add(link);
+      results.push({
+        rank: results.length + 1,
+        title,
+        link,
+        description,
+      });
+    }
+
+    return results;
+  }
+
+  private resolveEngines(engines?: string[]): SearchEngine[] {
+    const fallback: SearchEngine[] = ['duckduckgo', 'bing', 'brave', 'exa'];
+    if (!Array.isArray(engines) || engines.length === 0) {
+      return fallback;
+    }
+
+    const parsed = engines
+      .map((item) => this.clean(String(item)).toLowerCase())
+      .filter((item): item is SearchEngine =>
+        item === 'duckduckgo' || item === 'bing' || item === 'brave' || item === 'exa',
+      );
+
+    return parsed.length > 0 ? Array.from(new Set(parsed)) : fallback;
+  }
+
+  private resolveLimit(limit?: number): number {
+    if (typeof limit !== 'number' || !Number.isFinite(limit)) {
+      return 5;
+    }
+    const normalized = Math.floor(limit);
+    if (normalized < 1) {
+      return 1;
+    }
+    return normalized > 10 ? 10 : normalized;
   }
 }

@@ -34,7 +34,7 @@ Available tools:
 - memory_lookup: search persisted memory for this domain.
 
 Tool usage policy:
-- Prefer flow: search -> choose URL(s) -> scrape -> semrush.
+- Prefer flow: search affiliate program, or pricing -> choose affiliate program, or pricing URL(s) -> scrape page -> semrush.
 - If scraped data is still not enough, you may search again with a more specific query.
 - If new search results are mostly the same as previous results, stop repeating search and continue analysis/finalization.
 - Avoid calling the exact same tool input repeatedly unless there is new rationale.
