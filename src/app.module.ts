@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AiModule } from './modules/ai';
+import { DomainModule } from './modules/ai/domain/domain.module';
 import { DatabaseEntities } from './database/entities';
 import { envValidationSchema } from './config';
 
@@ -25,6 +26,7 @@ import { envValidationSchema } from './config';
       }),
     }),
     AiModule,
+    DomainModule,
   ],
 })
 export class AppModule {}
