@@ -1,6 +1,4 @@
 import { Injectable } from '@nestjs/common';
-import axios from 'axios';
-import * as cheerio from 'cheerio';
 import { AgentTool } from './tool.types';
 import { ToolExecutionResult } from '../agent';
 
@@ -15,10 +13,16 @@ interface SimpleSearchResult {
   description: string;
 }
 
+interface OpenWebSearchEngineResult {
+  title?: unknown;
+  url?: unknown;
+  description?: unknown;
+}
+
 @Injectable()
 export class UrlSearchTool implements AgentTool {
   readonly name = 'url_search';
-  readonly description = 'Simple Bing RSS search tool (top 5 results).';
+  readonly description = 'Web search powered by open-websearch engine.';
 
   async execute(input: string, domain: string): Promise<ToolExecutionResult> {
     const query = this.resolveQuery(input, domain);
@@ -28,7 +32,7 @@ export class UrlSearchTool implements AgentTool {
         output: JSON.stringify(
           {
             tool: 'url_search',
-            provider: 'bing_rss',
+            provider: 'open_websearch',
             query: '',
             total: 0,
             results: [],
@@ -40,31 +44,15 @@ export class UrlSearchTool implements AgentTool {
       };
     }
 
-    const endpoint = `https://www.bing.com/search?format=rss&q=${encodeURIComponent(query)}`;
-
     try {
-      const response = await axios.get<string>(endpoint, {
-        timeout: 30000,
-        headers: {
-  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36', // UA mới hơn
-  'Accept': 'application/rss+xml, application/xml, text/xml, */*',
-  'Accept-Language': 'en-US,en;q=0.9,vi;q=0.8',
-  'Referer': 'https://www.bing.com/',
-  'Sec-Fetch-Site': 'same-origin',
-  'Sec-Fetch-Mode': 'navigate',
-  'Sec-Fetch-Dest': 'document',
-  'Cache-Control': 'no-cache',
-  'Pragma': 'no-cache'
-}
-      });
-
-      const results = this.parseRssItems(response.data);
+      const results = await this.searchWithOpenWebSearch(query);
       return {
         ok: true,
         output: JSON.stringify(
           {
             tool: 'url_search',
-            provider: 'bing_rss',
+            provider: 'open_websearch',
+            engine: 'duckduckgo',
             query,
             total: results.length,
             results,
@@ -80,11 +68,12 @@ export class UrlSearchTool implements AgentTool {
         output: JSON.stringify(
           {
             tool: 'url_search',
-            provider: 'bing_rss',
+            provider: 'open_websearch',
+            engine: 'duckduckgo',
             query,
             total: 0,
             results: [],
-            error: `Bing RSS request failed: ${message}`,
+            error: `open-websearch request failed: ${message}`,
           },
           null,
           2,
@@ -93,19 +82,20 @@ export class UrlSearchTool implements AgentTool {
     }
   }
 
-  private parseRssItems(xml: string): SimpleSearchResult[] {
-    const $ = cheerio.load(xml, { xmlMode: true });
+  private async searchWithOpenWebSearch(query: string): Promise<SimpleSearchResult[]> {
+    const searchDuckDuckGo = await this.loadDuckduckgoEngine();
+    const rawResults = (await searchDuckDuckGo(query, 5)) as OpenWebSearchEngineResult[];
     const results: SimpleSearchResult[] = [];
     const seen = new Set<string>();
 
-    $('item').each((_, item) => {
+    rawResults.forEach((item) => {
       if (results.length >= 5) {
         return;
       }
 
-      const title = this.clean($(item).find('title').text());
-      const link = this.clean($(item).find('link').text());
-      const description = this.clean($(item).find('description').text());
+      const title = this.clean(this.toText(item.title));
+      const link = this.clean(this.toText(item.url));
+      const description = this.clean(this.toText(item.description));
 
       if (!title || !link || !this.isHttpUrl(link) || seen.has(link)) {
         return;
@@ -162,5 +152,23 @@ export class UrlSearchTool implements AgentTool {
 
   private isHttpUrl(value: string): boolean {
     return /^https?:\/\/.+/i.test(value);
+  }
+
+  private toText(value: unknown): string {
+    return typeof value === 'string' ? value : '';
+  }
+
+  private async loadDuckduckgoEngine(): Promise<(query: string, limit: number) => Promise<unknown>> {
+    const dynamicImport = new Function('specifier', 'return import(specifier)') as (
+      specifier: string,
+    ) => Promise<Record<string, unknown>>;
+    const module = await dynamicImport('open-websearch/build/engines/duckduckgo/searchDuckDuckGo.js');
+    const fn = module.searchDuckDuckGo;
+
+    if (typeof fn !== 'function') {
+      throw new Error('Cannot load searchDuckDuckGo from open-websearch');
+    }
+
+    return fn as (query: string, limit: number) => Promise<unknown>;
   }
 }

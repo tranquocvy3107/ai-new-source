@@ -18,7 +18,7 @@ export interface AgentToolCall {
 
 export interface ToolExecutionResult {
   ok: boolean;
-  output: string;
+  output: string | Record<string, unknown> | unknown[];
   metadata?: Record<string, unknown>;
 }
 

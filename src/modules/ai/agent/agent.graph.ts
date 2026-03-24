@@ -163,9 +163,10 @@ export class AgentGraphService {
           };
         }
         await params.onToolResult(tool.name, result, state.step);
+        const outputText = this.toOutputText(result.output);
 
         const extractedSearchUrls =
-          tool.name === 'url_search' ? this.extractUrlsFromSearchResult(result.output) : state.lastSearchUrls;
+          tool.name === 'url_search' ? this.extractUrlsFromSearchResult(outputText) : state.lastSearchUrls;
         const extractedUrl =
           tool.name === 'url_search'
             ? extractedSearchUrls[0] || state.lastSearchTopUrl
@@ -179,7 +180,7 @@ export class AgentGraphService {
 
         return {
           lastToolResult: result,
-          recentContext: result.output.slice(0, 2000),
+          recentContext: outputText.slice(0, 2000),
           lastSearchTopUrl: extractedUrl,
           lastSearchUrls: extractedSearchUrls,
           searchSignatures: searchSignature ? [searchSignature] : [],
@@ -187,7 +188,7 @@ export class AgentGraphService {
           // checkedConnectUrls: checkedUrl,
           toolHistory: [`${tool.name}|${toolInput}`],
           scratchpad: [
-            `Tool ${tool.name}(${toolInput}) => ${result.output.slice(0, 1200)}`,
+            `Tool ${tool.name}(${toolInput}) => ${outputText.slice(0, 1200)}`,
           ],
         };
       })
@@ -573,6 +574,17 @@ export class AgentGraphService {
       return JSON.parse(value);
     } catch {
       return null;
+    }
+  }
+
+  private toOutputText(value: ToolExecutionResult['output']): string {
+    if (typeof value === 'string') {
+      return value;
+    }
+    try {
+      return JSON.stringify(value, null, 2);
+    } catch {
+      return String(value ?? '');
     }
   }
 }
