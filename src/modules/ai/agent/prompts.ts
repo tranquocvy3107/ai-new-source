@@ -75,11 +75,19 @@ User input:
 Domain:
 {domain}
 
+Memory summary:
+{memorySummary}
+
 Execution scratchpad:
 {scratchpad}
 
 Required output format:
 {resultFormat}
 
-Write in Vietnamese, concise, actionable, and do not invent missing facts.
+Critical output rules:
+1) Return strict JSON only, no markdown.
+2) Keep exact key structure from Required output format.
+3) Only use facts that exist in execution scratchpad or memory summary.
+4) Any missing/uncertain field must be null (never guess).
+5) Do not add extra keys.
 `;

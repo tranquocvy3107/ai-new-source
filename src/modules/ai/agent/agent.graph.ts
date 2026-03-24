@@ -10,7 +10,11 @@ import {
   SUMMARY_PROMPT_TEMPLATE,
 } from './prompts';
 import { AgentDecision, ToolExecutionResult } from './agent.types';
-import { AFFILIATE_RESEARCH_SCOPE, AFFILIATE_RESULT_FORMAT } from './research-context';
+import { AFFILIATE_RESEARCH_SCOPE } from './research-context';
+import {
+  GOOGLE_ADS_EXPORT_SCHEMA_TEXT,
+  normalizeGoogleAdsExportPayload,
+} from './google-ads-export.schema';
 
 const AgentState = Annotation.Root({
   input: Annotation<string>(),
@@ -193,18 +197,25 @@ export class AgentGraphService {
         };
       })
       .addNode('respond', async (state: AgentStateType) => {
-        if (state.decision?.action === 'final' && state.decision.finalAnswer) {
+        const existingFinalAnswer =
+          state.decision?.action === 'final' ? state.decision.finalAnswer : undefined;
+        const parsedExistingFinalAnswer = existingFinalAnswer
+          ? this.tryParseJsonText(existingFinalAnswer)
+          : null;
+
+        if (parsedExistingFinalAnswer !== null) {
           return {
-            finalAnswer: this.formatFinalAnswer(state.decision.finalAnswer),
+            finalAnswer: this.formatFinalAnswer(parsedExistingFinalAnswer),
           };
         }
 
         try {
           const finalPayload = await this.llmService.generateJson<Record<string, unknown>>(
-            'You are an AI agent summarizing execution in clear Vietnamese. Keep useful details and actionability. Return strict JSON only.',
+            'You are an AI agent summarizing execution into structured JSON for downstream Google Ads automation.',
             `${this.renderFinalResponsePrompt({
               input: state.input,
               domain: state.domain,
+              memorySummary: state.memorySummary,
               scratchpad: state.scratchpad.join('\n'),
             })}\nOutput strict JSON only. Do not use markdown.`,
           );
@@ -212,10 +223,11 @@ export class AgentGraphService {
           return { finalAnswer: this.formatFinalAnswer(finalPayload) };
         } catch {
           const fallback = await this.llmService.generateText(
-            'You are an AI agent summarizing execution in clear Vietnamese. Keep useful details and actionability.',
+            'You are an AI agent summarizing execution into strict JSON only for downstream Google Ads automation.',
             this.renderFinalResponsePrompt({
               input: state.input,
               domain: state.domain,
+              memorySummary: state.memorySummary,
               scratchpad: state.scratchpad.join('\n'),
             }),
           );
@@ -281,9 +293,21 @@ export class AgentGraphService {
 
   private applyExecutionPolicy(decision: AgentDecision, state: AgentStateType): AgentDecision {
     const hasSemrushCall = this.hasToolCall(state.toolHistory, 'semrush_traffic');
+    const hasMemoryLookupCall = this.hasToolCall(state.toolHistory, 'memory_lookup');
     const semrushInput = state.domain?.trim() || state.input?.trim() || '';
 
     if (decision.action === 'final') {
+      const hasDomainMemory = Boolean(state.memorySummary && state.memorySummary !== 'No summary yet.');
+      if (state.step < state.maxSteps && hasDomainMemory && !state.scratchpad.length && !hasMemoryLookupCall) {
+        return {
+          thought:
+            'I should load persisted memory chunks for this domain before finalizing to improve output completeness.',
+          action: 'tool',
+          toolName: 'memory_lookup',
+          toolInput: `${state.domain} affiliate google ads`,
+        };
+      }
+
       if (state.step < state.maxSteps && !hasSemrushCall && semrushInput) {
         return {
           thought:
@@ -489,12 +513,14 @@ export class AgentGraphService {
   private renderFinalResponsePrompt(input: {
     input: string;
     domain: string;
+    memorySummary: string;
     scratchpad: string;
   }): string {
     return FINAL_RESPONSE_PROMPT_TEMPLATE.replace('{input}', input.input)
       .replace('{domain}', input.domain)
+      .replace('{memorySummary}', input.memorySummary || 'No summary yet.')
       .replace('{scratchpad}', input.scratchpad || 'No scratchpad yet.')
-      .replace('{resultFormat}', AFFILIATE_RESULT_FORMAT.trim());
+      .replace('{resultFormat}', GOOGLE_ADS_EXPORT_SCHEMA_TEXT);
   }
 
   private normalizeDecision(rawDecision: unknown): AgentDecision {
@@ -550,23 +576,15 @@ export class AgentGraphService {
   }
 
   private formatFinalAnswer(value: unknown): string {
-    if (typeof value === 'string') {
-      const trimmed = value.trim();
-      if (!trimmed) {
-        return JSON.stringify({ summary: 'No final answer generated.' }, null, 2);
-      }
-      const maybeJson = this.tryParseJsonText(trimmed);
-      if (maybeJson !== null) {
-        return JSON.stringify(maybeJson, null, 2);
-      }
-      return JSON.stringify({ summary: trimmed }, null, 2);
-    }
+    const parsed =
+      typeof value === 'string'
+        ? this.tryParseJsonText(value.trim())
+        : value && typeof value === 'object'
+          ? value
+          : null;
 
-    if (value && typeof value === 'object') {
-      return JSON.stringify(value, null, 2);
-    }
-
-    return JSON.stringify({ summary: String(value ?? '') }, null, 2);
+    const normalized = normalizeGoogleAdsExportPayload(parsed ?? {});
+    return JSON.stringify(normalized, null, 2);
   }
 
   private tryParseJsonText(value: string): unknown | null {
