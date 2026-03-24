@@ -15,7 +15,7 @@ export class WebScrapeTool implements AgentTool {
   constructor(private readonly configService: ConfigService) {}
 
   async execute(input: string, _domain: string): Promise<ToolExecutionResult> {
-    const timeout = this.configService.get<number>('REQUEST_TIMEOUT_MS', 30000);
+    const timeout = this.configService.get<number>('REQUEST_TIMEOUT_MS', 60000);
     const response = await axios.get<string>(input, {
       timeout,
       headers: {
