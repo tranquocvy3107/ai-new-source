@@ -40,7 +40,7 @@ export class UrlSearchTool implements AgentTool {
       };
     }
 
-    const endpoint = `https://www.bing.com/search?format=rss&q=${encodeURIComponent(query)}&mkt=en-US&setlang=en-US`;
+    const endpoint = `https://www.bing.com/search?format=rss&q=${encodeURIComponent(query)}`;
 
     try {
       const response = await axios.get<string>(endpoint, {
@@ -49,7 +49,7 @@ export class UrlSearchTool implements AgentTool {
           'User-Agent':
             'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36',
 
-          'Accept-Language': 'en-US,en;q=0.9',
+          'Accept-Language': 'vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7',
 
           'Referer': 'https://www.bing.com/',
 

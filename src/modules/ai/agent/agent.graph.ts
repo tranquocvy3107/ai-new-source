@@ -111,14 +111,6 @@ export class AgentGraphService {
           decision = {
             thought: 'I cannot parse JSON planning output, I will finish with best available answer.',
             action: 'final',
-            finalAnswer: JSON.stringify(
-              {
-                status: 'planner_parse_failed',
-                message: 'Agent planning parser failed. Please rerun with the same input.',
-              },
-              null,
-              2,
-            ),
           };
         }
 
@@ -142,7 +134,10 @@ export class AgentGraphService {
         }
 
         const tool = decision.toolName ? toolMap.get(decision.toolName) : undefined;
-        const toolInput = decision.toolInput ?? '';
+        let toolInput = decision.toolInput ?? '';
+        if (decision.toolName === 'web_scrape') {
+          toolInput = this.normalizeUrlCandidate(toolInput);
+        }
 
         if (!tool) {
           const missingResult: ToolExecutionResult = {
@@ -157,7 +152,16 @@ export class AgentGraphService {
         }
 
         await params.onToolCall(tool.name, toolInput, state.step);
-        const result = await tool.execute(toolInput, state.domain);
+        let result: ToolExecutionResult;
+        try {
+          result = await tool.execute(toolInput, state.domain);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Unknown tool error';
+          result = {
+            ok: false,
+            output: `Tool "${tool.name}" failed: ${message}`,
+          };
+        }
         await params.onToolResult(tool.name, result, state.step);
 
         const extractedSearchUrls =
@@ -275,7 +279,38 @@ export class AgentGraphService {
   }
 
   private applyExecutionPolicy(decision: AgentDecision, state: AgentStateType): AgentDecision {
-    if (decision.action !== 'tool') {
+    const hasSemrushCall = this.hasToolCall(state.toolHistory, 'semrush_traffic');
+    const semrushInput = state.domain?.trim() || state.input?.trim() || '';
+
+    if (decision.action === 'final') {
+      if (state.step < state.maxSteps && !hasSemrushCall && semrushInput) {
+        return {
+          thought:
+            'Before finalizing affiliate research, I should collect or at least attempt Semrush traffic/authority signals once.',
+          action: 'tool',
+          toolName: 'semrush_traffic',
+          toolInput: semrushInput,
+        };
+      }
+
+      if (state.step < state.maxSteps) {
+        const nextUrlToScrape = this.pickNextUrlToScrape(state.lastSearchUrls, state.visitedScrapeUrls);
+        const fallbackSearchUrl = this.isLikelyUrl(state.lastSearchTopUrl) ? state.lastSearchTopUrl : '';
+        const candidateUrl = nextUrlToScrape || fallbackSearchUrl;
+        const hasSearchEvidence = Boolean(candidateUrl);
+        const hasScrapedEvidence = state.visitedScrapeUrls.length > 0;
+
+        if (hasSearchEvidence && !hasScrapedEvidence) {
+          return {
+            thought:
+              'I already have search results but no scraped page evidence yet. I will scrape one candidate URL before finalizing.',
+            action: 'tool',
+            toolName: 'web_scrape',
+            toolInput: candidateUrl,
+          };
+        }
+      }
+
       return decision;
     }
 
@@ -322,6 +357,26 @@ export class AgentGraphService {
           action: 'tool',
           toolName: 'url_search',
           toolInput: `${state.domain} affiliate program pricing commission`,
+        };
+      }
+    }
+
+    if (decision.toolName === 'semrush_traffic') {
+      if (hasSemrushCall) {
+        return {
+          thought:
+            'Semrush traffic was already queried in this run. I will avoid duplicate Semrush calls and continue analysis.',
+          action: 'final',
+        };
+      }
+
+      if (!normalizedInput && semrushInput) {
+        return {
+          thought:
+            'Semrush tool input was empty. I will use the current research domain as Semrush query input.',
+          action: 'tool',
+          toolName: 'semrush_traffic',
+          toolInput: semrushInput,
         };
       }
     }
@@ -375,9 +430,19 @@ export class AgentGraphService {
     return decision;
   }
 
+  private hasToolCall(toolHistory: string[], toolName: string): boolean {
+    return toolHistory.some((item) => item.toLowerCase().startsWith(`${toolName.toLowerCase()}|`));
+  }
+
   private extractUrlsFromSearchResult(content: string): string[] {
     const matches = Array.from(content.matchAll(/https?:\/\/[^\s)]+/gi)).map((match) => match[0]);
-    const unique = Array.from(new Set(matches.map((value) => value.trim())));
+    const unique = Array.from(
+      new Set(
+        matches
+          .map((value) => this.normalizeUrlCandidate(value))
+          .filter((value) => this.isLikelyUrl(value)),
+      ),
+    );
     return unique.slice(0, 10);
   }
 
@@ -399,12 +464,25 @@ export class AgentGraphService {
 
   private pickNextUrlToScrape(searchUrls: string[], visitedScrapeUrls: string[]): string {
     const visited = new Set(visitedScrapeUrls.map((item) => item.trim().toLowerCase()));
-    const candidate = searchUrls.find((url) => !visited.has(url.trim().toLowerCase()));
+    const candidate = searchUrls.find((url) => !visited.has(this.normalizeUrlCandidate(url).toLowerCase()));
     return candidate ?? '';
   }
 
   private isLikelyUrl(value: string): boolean {
-    return /^https?:\/\/.+/i.test(value);
+    try {
+      const url = new URL(value.trim());
+      return url.protocol === 'http:' || url.protocol === 'https:';
+    } catch {
+      return false;
+    }
+  }
+
+  private normalizeUrlCandidate(value: string): string {
+    return value
+      .trim()
+      .replace(/^[\s"'(<\[{]+/, '')
+      .replace(/[>"')\],.;:!?]+$/g, '')
+      .replace(/[\\]+$/g, '');
   }
 
   private renderFinalResponsePrompt(input: {
@@ -434,14 +512,6 @@ export class AgentGraphService {
         return {
           thought: `${thought} Tool name was missing, so I will finalize with current context.`,
           action: 'final',
-          finalAnswer: JSON.stringify(
-            {
-              status: 'invalid_tool_decision',
-              message: 'Tool action was selected but toolName is missing.',
-            },
-            null,
-            2,
-          ),
         };
       }
 
@@ -456,16 +526,7 @@ export class AgentGraphService {
     return {
       thought,
       action: 'final',
-      finalAnswer:
-        finalAnswer ||
-        JSON.stringify(
-          {
-            status: 'completed_without_final_text',
-            message: 'Planner selected final action without finalAnswer text.',
-          },
-          null,
-          2,
-        ),
+      ...(finalAnswer ? { finalAnswer } : {}),
     };
   }
 
