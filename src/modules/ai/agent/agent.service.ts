@@ -7,6 +7,7 @@ import { MemoryService } from '../memory';
 import { AgentStreamService } from '../stream';
 import {
   CheckConnectTool,
+  DomainClassifyTool,
   MemoryLookupTool,
   SemrushTrafficTool,
   UrlSearchTool,
@@ -27,6 +28,7 @@ export class AgentService {
     private readonly webScrapeTool: WebScrapeTool,
     private readonly semrushTrafficTool: SemrushTrafficTool,
     private readonly memoryLookupTool: MemoryLookupTool,
+    private readonly domainClassifyTool: DomainClassifyTool,
     @InjectRepository(AgentRunEntity)
     private readonly runRepo: Repository<AgentRunEntity>,
     @InjectRepository(AgentEventEntity)
@@ -90,6 +92,7 @@ export class AgentService {
           this.webScrapeTool,
           this.semrushTrafficTool,
           this.memoryLookupTool,
+          this.domainClassifyTool,
         ],
         onThinking: async (thought, step) =>
           pushEvent({

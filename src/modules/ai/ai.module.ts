@@ -13,12 +13,14 @@ import { MemoryService } from './memory';
 import { ChunkService, RagService, VectorService } from './rag';
 import { AgentStreamService } from './stream';
 import {
+  CheckConnectTool,
+  DomainClassifyTool,
   MemoryLookupTool,
   SemrushTrafficTool,
   UrlSearchTool,
   WebScrapeTool,
-  CheckConnectTool
 } from './tools';
+import { DomainModule } from './domain/domain.module';
 
 @Module({
   imports: [
@@ -28,6 +30,7 @@ import {
       DomainMemoryEntity,
       MemoryChunkEntity,
     ]),
+    DomainModule,
   ],
   controllers: [AiController],
   providers: [
@@ -42,9 +45,9 @@ import {
     SemrushTrafficTool,
     MemoryLookupTool,
     CheckConnectTool,
+    DomainClassifyTool,
     AgentGraphService,
     AgentService,
-    
   ],
   exports: [AgentService],
 })

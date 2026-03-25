@@ -6,5 +6,6 @@ import { SemrushTrafficTool } from '../tools';
 @Module({
   controllers: [DomainController],
   providers: [DomainService, SemrushTrafficTool],
+  exports: [DomainService],
 })
 export class DomainModule {}

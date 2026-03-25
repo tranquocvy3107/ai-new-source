@@ -1,4 +1,5 @@
 export * from './check-connect.tool';
+export * from './domain-classify.tool';
 export * from './memory-lookup.tool';
 export * from './semrush-traffic.tool';
 export * from './tool.types';

@@ -12,6 +12,7 @@ Rules:
 6) Prefer reusing memory when possible.
 7) Never fabricate tool outputs.
 8) If request is affiliate domain research, prioritize collecting: affiliate program, products, pricing, commission, referral link, traffic signals, scoring, and Google Ads prep data.
+9) Use domain_classify early to get pre-computed investment signals and opportunity scores before spending steps on scraping or searching.
 `;
 
 export const DECISION_PROMPT_TEMPLATE = `
@@ -32,9 +33,11 @@ Available tools:
 - web_scrape: fetch and extract meaningful page text from a URL.
 - semrush_traffic: fetch traffic/authority signals for a domain (if Semrush credential is configured).
 - memory_lookup: search persisted memory for this domain.
+- domain_classify: classify and score a pre-loaded list of affiliate domains. Returns investment signals (ALL_IN/SCALING/WATCHLIST/HIGH_BARRIER/AVOID), opportunity scores, traffic metrics, commission details, and promotion platform recommendations. Use this early in research to identify which domains are worth pursuing before doing deeper scraping/search.
 
 Tool usage policy:
-- Prefer flow: search affiliate program, or pricing -> choose affiliate program, or pricing URL(s) -> scrape page -> semrush.
+- Prefer flow: domain_classify (get investment signals) -> search affiliate program or pricing for top-ranked domains -> scrape page -> semrush.
+- Call domain_classify first if the task involves comparing or prioritizing multiple domains.
 - If scraped data is still not enough, you may search again with a more specific query.
 - If new search results are mostly the same as previous results, stop repeating search and continue analysis/finalization.
 - Avoid calling the exact same tool input repeatedly unless there is new rationale.
