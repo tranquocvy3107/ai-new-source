@@ -51,6 +51,18 @@ const AgentState = Annotation.Root({
     reducer: (_, update) => update,
     default: () => [],
   }),
+  affiliateUrlCandidate: Annotation<string>({
+    reducer: (_, update) => update,
+    default: () => '',
+  }),
+  pricingUrlCandidate: Annotation<string>({
+    reducer: (_, update) => update,
+    default: () => '',
+  }),
+  semrushSnapshot: Annotation<Record<string, unknown> | null>({
+    reducer: (_, update) => update,
+    default: () => null,
+  }),
   searchSignatures: Annotation<string[]>({
     reducer: (current, update) => [...current, ...update],
     default: () => [],
@@ -179,6 +191,25 @@ export class AgentGraphService {
           tool.name === 'url_search' ? this.buildSearchSignature(extractedSearchUrls) : '';
         const scrapedUrl =
           tool.name === 'web_scrape' && this.isLikelyUrl(toolInput) ? [toolInput.trim()] : [];
+        const normalizedDomain = this.normalizeDomain(state.domain);
+        const affiliateCandidateFromSearch =
+          tool.name === 'url_search'
+            ? this.pickBestSearchUrl(extractedSearchUrls, normalizedDomain, 'affiliate', [])
+            : '';
+        const pricingCandidateFromSearch =
+          tool.name === 'url_search'
+            ? this.pickBestSearchUrl(extractedSearchUrls, normalizedDomain, 'pricing', [])
+            : '';
+        const scrapedAffiliateUrl =
+          tool.name === 'web_scrape' && this.isAffiliateEvidence(toolInput, outputText, normalizedDomain)
+            ? this.normalizeUrlCandidate(toolInput)
+            : '';
+        const scrapedPricingUrl =
+          tool.name === 'web_scrape' && this.isPricingEvidence(toolInput, outputText, normalizedDomain)
+            ? this.normalizeUrlCandidate(toolInput)
+            : '';
+        const semrushSnapshot =
+          tool.name === 'semrush_traffic' ? this.asObject(result.output) : state.semrushSnapshot;
         // const checkedUrl =
         //   tool.name === 'check_connect' && this.isLikelyUrl(toolInput) ? [toolInput.trim()] : [];
 
@@ -187,6 +218,11 @@ export class AgentGraphService {
           recentContext: outputText.slice(0, 2000),
           lastSearchTopUrl: extractedUrl,
           lastSearchUrls: extractedSearchUrls,
+          affiliateUrlCandidate:
+            scrapedAffiliateUrl || affiliateCandidateFromSearch || state.affiliateUrlCandidate,
+          pricingUrlCandidate:
+            scrapedPricingUrl || pricingCandidateFromSearch || state.pricingUrlCandidate,
+          semrushSnapshot,
           searchSignatures: searchSignature ? [searchSignature] : [],
           visitedScrapeUrls: scrapedUrl,
           // checkedConnectUrls: checkedUrl,
@@ -205,7 +241,7 @@ export class AgentGraphService {
 
         if (parsedExistingFinalAnswer !== null) {
           return {
-            finalAnswer: this.formatFinalAnswer(parsedExistingFinalAnswer),
+            finalAnswer: this.formatFinalAnswer(parsedExistingFinalAnswer, state),
           };
         }
 
@@ -220,7 +256,7 @@ export class AgentGraphService {
             })}\nOutput strict JSON only. Do not use markdown.`,
           );
 
-          return { finalAnswer: this.formatFinalAnswer(finalPayload) };
+          return { finalAnswer: this.formatFinalAnswer(finalPayload, state) };
         } catch {
           const fallback = await this.llmService.generateText(
             'You are an AI agent summarizing execution into strict JSON only for downstream Google Ads automation.',
@@ -231,7 +267,7 @@ export class AgentGraphService {
               scratchpad: state.scratchpad.join('\n'),
             }),
           );
-          return { finalAnswer: this.formatFinalAnswer(fallback) };
+          return { finalAnswer: this.formatFinalAnswer(fallback, state) };
         }
       })
       .addEdge(START, 'bootstrap')
@@ -292,9 +328,14 @@ export class AgentGraphService {
   }
 
   private applyExecutionPolicy(decision: AgentDecision, state: AgentStateType): AgentDecision {
+    const flowDecision = this.enforceMandatoryResearchFlow(state, decision);
+    if (flowDecision) {
+      return flowDecision;
+    }
+
     const hasSemrushCall = this.hasToolCall(state.toolHistory, 'semrush_traffic');
     const hasMemoryLookupCall = this.hasToolCall(state.toolHistory, 'memory_lookup');
-    const semrushInput = state.domain?.trim() || state.input?.trim() || '';
+    const semrushInput = this.normalizeDomain(state.domain || state.input);
 
     if (decision.action === 'final') {
       const hasDomainMemory = Boolean(state.memorySummary && state.memorySummary !== 'No summary yet.');
@@ -304,38 +345,9 @@ export class AgentGraphService {
             'I should load persisted memory chunks for this domain before finalizing to improve output completeness.',
           action: 'tool',
           toolName: 'memory_lookup',
-          toolInput: `${state.domain} affiliate google ads`,
+          toolInput: `${semrushInput || state.domain} affiliate google ads`,
         };
       }
-
-      if (state.step < state.maxSteps && !hasSemrushCall && semrushInput) {
-        return {
-          thought:
-            'Before finalizing affiliate research, I should collect or at least attempt Semrush traffic/authority signals once.',
-          action: 'tool',
-          toolName: 'semrush_traffic',
-          toolInput: semrushInput,
-        };
-      }
-
-      if (state.step < state.maxSteps) {
-        const nextUrlToScrape = this.pickNextUrlToScrape(state.lastSearchUrls, state.visitedScrapeUrls);
-        const fallbackSearchUrl = this.isLikelyUrl(state.lastSearchTopUrl) ? state.lastSearchTopUrl : '';
-        const candidateUrl = nextUrlToScrape || fallbackSearchUrl;
-        const hasSearchEvidence = Boolean(candidateUrl);
-        const hasScrapedEvidence = state.visitedScrapeUrls.length > 0;
-
-        if (hasSearchEvidence && !hasScrapedEvidence) {
-          return {
-            thought:
-              'I already have search results but no scraped page evidence yet. I will scrape one candidate URL before finalizing.',
-            action: 'tool',
-            toolName: 'web_scrape',
-            toolInput: candidateUrl,
-          };
-        }
-      }
-
       return decision;
     }
 
@@ -381,7 +393,7 @@ export class AgentGraphService {
             'Search query was empty. I will use a targeted affiliate query to continue data collection.',
           action: 'tool',
           toolName: 'url_search',
-          toolInput: `${state.domain} affiliate program pricing commission`,
+          toolInput: this.buildSearchToolInput(`${semrushInput || state.domain} affiliate program`),
         };
       }
     }
@@ -457,6 +469,299 @@ export class AgentGraphService {
 
   private hasToolCall(toolHistory: string[], toolName: string): boolean {
     return toolHistory.some((item) => item.toLowerCase().startsWith(`${toolName.toLowerCase()}|`));
+  }
+
+  private enforceMandatoryResearchFlow(
+    state: AgentStateType,
+    decision: AgentDecision,
+  ): AgentDecision | null {
+    if (state.step >= state.maxSteps) {
+      return null;
+    }
+
+    const domain = this.normalizeDomain(state.domain || state.input);
+    if (!domain) {
+      return null;
+    }
+
+    const toolCalls = this.parseToolHistory(state.toolHistory);
+    const scrapedEvidence = state.scratchpad.filter((item) =>
+      item.toLowerCase().startsWith('tool web_scrape('),
+    );
+    const hasAffiliateSearch = toolCalls.some(
+      (call) => call.name === 'url_search' && this.isAffiliateSearchQuery(call.input),
+    );
+    const hasAffiliateScrape =
+      toolCalls.some((call) => call.name === 'web_scrape' && this.isAffiliateEvidence(call.input, '', domain)) ||
+      scrapedEvidence.some((item) => this.isAffiliateEvidence('', item, domain));
+    const hasPricingSearch = toolCalls.some(
+      (call) => call.name === 'url_search' && this.isPricingSearchQuery(call.input),
+    );
+    const hasPricingScrape =
+      toolCalls.some((call) => call.name === 'web_scrape' && this.isPricingEvidence(call.input, '', domain)) ||
+      scrapedEvidence.some((item) => this.isPricingEvidence('', item, domain));
+    const hasSemrushCall = toolCalls.some((call) => call.name === 'semrush_traffic');
+
+    const affiliateQuery = `${domain} affiliate program`;
+    const pricingQuery = `${domain} pricing plans`;
+
+    if (!hasAffiliateSearch) {
+      if (decision.action === 'tool' && decision.toolName === 'url_search' && this.isAffiliateSearchQuery(decision.toolInput ?? '')) {
+        return {
+          ...decision,
+          toolInput: this.buildSearchToolInput(this.extractQueryFromToolInput(decision.toolInput ?? '') || affiliateQuery),
+        };
+      }
+      return {
+        thought:
+          'I must start by searching affiliate program sources first. I will run url_search and gather the top 5 links.',
+        action: 'tool',
+        toolName: 'url_search',
+        toolInput: this.buildSearchToolInput(affiliateQuery),
+      };
+    }
+
+    if (!hasAffiliateScrape) {
+      const affiliateCandidate =
+        state.affiliateUrlCandidate ||
+        this.pickBestSearchUrl(state.lastSearchUrls, domain, 'affiliate', state.visitedScrapeUrls);
+
+      if (
+        decision.action === 'tool' &&
+        decision.toolName === 'web_scrape' &&
+        this.isAffiliateEvidence(decision.toolInput ?? '', '', domain)
+      ) {
+        return decision;
+      }
+
+      if (affiliateCandidate) {
+        return {
+          thought:
+            'I have affiliate search results and need evidence from the closest official affiliate URL before moving on.',
+          action: 'tool',
+          toolName: 'web_scrape',
+          toolInput: affiliateCandidate,
+        };
+      }
+
+      return {
+        thought:
+          'Affiliate scrape target is still unclear, so I will refresh affiliate-focused search results before continuing.',
+        action: 'tool',
+        toolName: 'url_search',
+        toolInput: this.buildSearchToolInput(affiliateQuery),
+      };
+    }
+
+    if (!hasPricingSearch) {
+      if (decision.action === 'tool' && decision.toolName === 'url_search' && this.isPricingSearchQuery(decision.toolInput ?? '')) {
+        return {
+          ...decision,
+          toolInput: this.buildSearchToolInput(this.extractQueryFromToolInput(decision.toolInput ?? '') || pricingQuery),
+        };
+      }
+      return {
+        thought:
+          'Affiliate details are collected. Next I need pricing model data, so I will search pricing pages.',
+        action: 'tool',
+        toolName: 'url_search',
+        toolInput: this.buildSearchToolInput(pricingQuery),
+      };
+    }
+
+    if (!hasPricingScrape) {
+      const pricingCandidate =
+        state.pricingUrlCandidate ||
+        this.pickBestSearchUrl(state.lastSearchUrls, domain, 'pricing', state.visitedScrapeUrls);
+
+      if (
+        decision.action === 'tool' &&
+        decision.toolName === 'web_scrape' &&
+        this.isPricingEvidence(decision.toolInput ?? '', '', domain)
+      ) {
+        return decision;
+      }
+
+      if (pricingCandidate) {
+        return {
+          thought:
+            'I have pricing search results and should scrape the most relevant official pricing URL before Semrush.',
+          action: 'tool',
+          toolName: 'web_scrape',
+          toolInput: pricingCandidate,
+        };
+      }
+
+      return {
+        thought:
+          'Pricing scrape target is unclear, so I will run one more pricing-focused search to find an official pricing page.',
+        action: 'tool',
+        toolName: 'url_search',
+        toolInput: this.buildSearchToolInput(pricingQuery),
+      };
+    }
+
+    if (!hasSemrushCall) {
+      if (decision.action === 'tool' && decision.toolName === 'semrush_traffic') {
+        return {
+          ...decision,
+          toolInput: decision.toolInput?.trim() || domain,
+        };
+      }
+      return {
+        thought:
+          'I now have affiliate and pricing evidence. Next I need Semrush traffic/authority signals before final JSON.',
+        action: 'tool',
+        toolName: 'semrush_traffic',
+        toolInput: domain,
+      };
+    }
+
+    return null;
+  }
+
+  private parseToolHistory(toolHistory: string[]): Array<{ name: string; input: string }> {
+    return toolHistory
+      .map((item) => {
+        const index = item.indexOf('|');
+        if (index < 0) {
+          return { name: item.trim(), input: '' };
+        }
+        return {
+          name: item.slice(0, index).trim(),
+          input: item.slice(index + 1).trim(),
+        };
+      })
+      .filter((item) => item.name.length > 0);
+  }
+
+  private extractQueryFromToolInput(input: string): string {
+    const raw = input.trim();
+    if (!raw) {
+      return '';
+    }
+
+    if (!raw.startsWith('{')) {
+      return raw;
+    }
+
+    try {
+      const parsed = JSON.parse(raw) as { query?: unknown };
+      return typeof parsed.query === 'string' ? parsed.query.trim() : '';
+    } catch {
+      return '';
+    }
+  }
+
+  private isAffiliateSearchQuery(input: string): boolean {
+    const query = this.extractQueryFromToolInput(input).toLowerCase();
+    return /affiliate|affiliates|partner program|referral|ambassador/.test(query);
+  }
+
+  private isPricingSearchQuery(input: string): boolean {
+    const query = this.extractQueryFromToolInput(input).toLowerCase();
+    return /pricing|price|plans|plan|subscription|billing/.test(query);
+  }
+
+  private buildSearchToolInput(query: string): string {
+    return JSON.stringify({ query: query.trim(), limit: 5 });
+  }
+
+  private pickBestSearchUrl(
+    searchUrls: string[],
+    domain: string,
+    intent: 'affiliate' | 'pricing',
+    visitedUrls: string[],
+  ): string {
+    const visited = new Set(visitedUrls.map((item) => this.normalizeUrlCandidate(item).toLowerCase()));
+    const candidates = searchUrls
+      .map((item) => this.normalizeUrlCandidate(item))
+      .filter((item) => this.isLikelyUrl(item) && !visited.has(item.toLowerCase()));
+
+    if (candidates.length === 0) {
+      return '';
+    }
+
+    const keywords =
+      intent === 'affiliate'
+        ? ['affiliate', 'affiliates', 'partner', 'referral', 'ambassador']
+        : ['pricing', 'price', 'plans', 'plan', 'subscription', 'billing'];
+
+    let bestUrl = candidates[0];
+    let bestScore = Number.NEGATIVE_INFINITY;
+
+    for (const candidate of candidates) {
+      const score = this.scoreUrlCandidate(candidate, domain, keywords);
+      if (score > bestScore) {
+        bestScore = score;
+        bestUrl = candidate;
+      }
+    }
+
+    return bestUrl;
+  }
+
+  private scoreUrlCandidate(url: string, domain: string, keywords: string[]): number {
+    try {
+      const parsed = new URL(url);
+      const hostname = parsed.hostname.replace(/^www\./i, '').toLowerCase();
+      const normalizedDomain = domain.toLowerCase();
+      const combinedPath = `${parsed.pathname}${parsed.search}`.toLowerCase();
+      let score = 0;
+
+      if (hostname === normalizedDomain || hostname.endsWith(`.${normalizedDomain}`)) {
+        score += 100;
+      } else if (normalizedDomain && hostname.includes(normalizedDomain.split('.')[0])) {
+        score += 25;
+      }
+
+      for (const keyword of keywords) {
+        if (combinedPath.includes(keyword)) {
+          score += 20;
+        }
+      }
+
+      if (combinedPath === '/' || combinedPath.length <= 2) {
+        score -= 10;
+      }
+
+      return score;
+    } catch {
+      return Number.NEGATIVE_INFINITY;
+    }
+  }
+
+  private isAffiliateEvidence(url: string, content: string, domain: string): boolean {
+    const text = `${url}\n${content}`.toLowerCase();
+    const hasKeyword = /affiliate|affiliates|commission|referral|partner portal|partner program/.test(text);
+    if (!url.trim()) {
+      return hasKeyword;
+    }
+    const sameDomain = this.isSameDomainUrl(url, domain);
+    return hasKeyword && (sameDomain || /partners\./.test(text));
+  }
+
+  private isPricingEvidence(url: string, content: string, domain: string): boolean {
+    const text = `${url}\n${content}`.toLowerCase();
+    const hasKeyword = /pricing|price|plans|subscription|billing|monthly|yearly/.test(text);
+    if (!url.trim()) {
+      return hasKeyword;
+    }
+    const sameDomain = this.isSameDomainUrl(url, domain);
+    return hasKeyword && sameDomain;
+  }
+
+  private isSameDomainUrl(url: string, domain: string): boolean {
+    if (!url || !this.isLikelyUrl(url) || !domain) {
+      return false;
+    }
+    try {
+      const hostname = new URL(url).hostname.replace(/^www\./i, '').toLowerCase();
+      const normalizedDomain = domain.replace(/^www\./i, '').toLowerCase();
+      return hostname === normalizedDomain || hostname.endsWith(`.${normalizedDomain}`);
+    } catch {
+      return false;
+    }
   }
 
   private extractUrlsFromSearchResult(content: string): string[] {
@@ -575,7 +880,7 @@ export class AgentGraphService {
     return fallback;
   }
 
-  private formatFinalAnswer(value: unknown): string {
+  private formatFinalAnswer(value: unknown, state: AgentStateType): string {
     const parsed =
       typeof value === 'string'
         ? this.tryParseJsonText(value.trim())
@@ -583,8 +888,206 @@ export class AgentGraphService {
           ? value
           : null;
 
-    const normalized = normalizeGoogleAdsExportPayload(parsed ?? {});
-    return JSON.stringify(normalized, null, 2);
+    const normalized = normalizeGoogleAdsExportPayload(parsed ?? {}) as Record<string, unknown>;
+    const hydrated = this.hydrateFinalPayload(normalized, state);
+    return JSON.stringify(hydrated, null, 2);
+  }
+
+  private hydrateFinalPayload(
+    normalized: Record<string, unknown>,
+    state: AgentStateType,
+  ): Record<string, unknown> {
+    const payload = JSON.parse(JSON.stringify(normalized)) as Record<string, unknown>;
+    const domain = this.normalizeDomain(state.domain || state.input);
+    const semrushSnapshot = state.semrushSnapshot ?? null;
+
+    if (domain) {
+      const site = this.ensureObject(payload, 'site');
+      if (!this.hasValue(site.domain)) {
+        site.domain = domain;
+      }
+    }
+
+    const semrushData = this.ensureObject(payload, 'semrushData');
+    const semrushSource = this.ensureObject(semrushData, 'source');
+    const hasSemrushCall = this.hasToolCall(state.toolHistory, 'semrush_traffic');
+    if (hasSemrushCall && domain) {
+      if (!this.hasValue(semrushSource.name)) {
+        semrushSource.name = 'semrush';
+      }
+      if (!this.hasValue(semrushSource.url)) {
+        semrushSource.url = `https://www.semrush.com/analytics/overview/?q=${domain}&searchType=domain`;
+      }
+      if (!this.hasValue(semrushSource.method)) {
+        semrushSource.method = 'rpc';
+      }
+    }
+
+    if (semrushSnapshot) {
+      const source = this.asObject(semrushSnapshot['source']);
+      const traffic = this.asObject(semrushSnapshot['traffic']);
+      const authority = this.asObject(semrushSnapshot['authority']);
+      const aiOverview = this.asObject(semrushSnapshot['aiOverview']);
+      const aiSources = this.asObject(semrushSnapshot['aiSources']);
+      const competitors = semrushSnapshot['competitors'];
+
+      if (source) {
+        this.fillMissingFields(semrushSource, source);
+      }
+
+      if (traffic) {
+        this.fillMissingFields(this.ensureObject(semrushData, 'traffic'), traffic);
+      }
+
+      if (authority) {
+        this.fillMissingFields(this.ensureObject(semrushData, 'authority'), authority);
+      }
+
+      if (aiOverview) {
+        this.fillMissingFields(this.ensureObject(semrushData, 'aiOverview'), aiOverview);
+      }
+
+      if (aiSources) {
+        this.fillMissingFields(this.ensureObject(semrushData, 'aiSources'), aiSources);
+      }
+
+      if (Array.isArray(competitors) && !Array.isArray(semrushData.competitors)) {
+        semrushData.competitors = competitors;
+      }
+    }
+
+    const affiliateUrl =
+      state.affiliateUrlCandidate ||
+      this.pickBestSearchUrl(
+        [...state.visitedScrapeUrls, ...state.lastSearchUrls],
+        domain,
+        'affiliate',
+        [],
+      );
+    const pricingUrl =
+      state.pricingUrlCandidate ||
+      this.pickBestSearchUrl(
+        [...state.visitedScrapeUrls, ...state.lastSearchUrls],
+        domain,
+        'pricing',
+        [],
+      );
+
+    const siteAffiliateInfo = this.ensureObject(payload, 'siteAffiliateInfo');
+    if (!this.hasValue(siteAffiliateInfo.programInfoLink) && affiliateUrl) {
+      siteAffiliateInfo.programInfoLink = affiliateUrl;
+    }
+
+    const pricingModels = payload.pricingModels;
+    if (Array.isArray(pricingModels) && pricingModels.length > 0) {
+      const firstModel = this.asObject(pricingModels[0]) ?? {};
+      if (!this.hasValue(firstModel.sourceDomain) && domain) {
+        firstModel.sourceDomain = domain;
+      }
+      if (!this.hasValue(firstModel.productUrl) && pricingUrl) {
+        firstModel.productUrl = pricingUrl;
+      }
+      if (!this.hasValue(firstModel.sourceType) && pricingUrl) {
+        firstModel.sourceType = 'official_pricing_page';
+      }
+      pricingModels[0] = firstModel;
+    } else if (pricingUrl || domain) {
+      payload.pricingModels = [
+        {
+          value: null,
+          modelName: null,
+          rawPrice: null,
+          currency: null,
+          billingCycle: null,
+          description: null,
+          productUrl: pricingUrl || null,
+          brand: null,
+          sourceDomain: domain || null,
+          sourceType: pricingUrl ? 'official_pricing_page' : null,
+          notes: null,
+        },
+      ];
+    }
+
+    return payload;
+  }
+
+  private fillMissingFields(target: Record<string, unknown>, source: Record<string, unknown>): void {
+    for (const key of Object.keys(source)) {
+      const sourceValue = source[key];
+      const targetValue = target[key];
+
+      if (!this.hasValue(targetValue) && this.hasValue(sourceValue)) {
+        target[key] = sourceValue;
+        continue;
+      }
+
+      if (
+        targetValue &&
+        sourceValue &&
+        typeof targetValue === 'object' &&
+        typeof sourceValue === 'object' &&
+        !Array.isArray(targetValue) &&
+        !Array.isArray(sourceValue)
+      ) {
+        this.fillMissingFields(
+          targetValue as Record<string, unknown>,
+          sourceValue as Record<string, unknown>,
+        );
+      }
+    }
+  }
+
+  private ensureObject(parent: Record<string, unknown>, key: string): Record<string, unknown> {
+    const value = parent[key];
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      parent[key] = {};
+    }
+    return parent[key] as Record<string, unknown>;
+  }
+
+  private hasValue(value: unknown): boolean {
+    if (value === null || value === undefined) {
+      return false;
+    }
+
+    if (typeof value === 'string') {
+      return value.trim().length > 0;
+    }
+
+    if (Array.isArray(value)) {
+      return value.length > 0;
+    }
+
+    return true;
+  }
+
+  private asObject(value: unknown): Record<string, unknown> | null {
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      return value as Record<string, unknown>;
+    }
+
+    if (typeof value === 'string') {
+      const parsed = this.tryParseJsonText(value);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>;
+      }
+    }
+
+    return null;
+  }
+
+  private normalizeDomain(value: string): string {
+    if (!value) {
+      return '';
+    }
+
+    return value
+      .trim()
+      .replace(/^https?:\/\//i, '')
+      .replace(/^www\./i, '')
+      .replace(/[/?#].*$/g, '')
+      .toLowerCase();
   }
 
   private tryParseJsonText(value: string): unknown | null {

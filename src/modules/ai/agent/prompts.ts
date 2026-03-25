@@ -34,8 +34,16 @@ Available tools:
 - memory_lookup: search persisted memory for this domain.
 
 Tool usage policy:
-- Prefer flow: search affiliate program, or pricing -> choose affiliate program, or pricing URL(s) -> scrape page -> semrush.
-- If scraped data is still not enough, you may search again with a more specific query.
+- Mandatory happy-path order for affiliate-domain research:
+  1) url_search for affiliate program (top 5 results)
+  2) web_scrape official/closest affiliate URL
+  3) url_search for pricing model (top 5 results)
+  4) web_scrape official/closest pricing URL
+  5) semrush_traffic once
+  6) final JSON response
+- Do not call semrush_traffic before both affiliate and pricing pages are scraped.
+- Do not finalize before steps (1) to (5) are completed (unless hard tool failure is clearly stated).
+- If scraped data is still not enough about affiliate programs, pricing model, or something else, you may search again with a more specific query.
 - If new search results are mostly the same as previous results, stop repeating search and continue analysis/finalization.
 - Avoid calling the exact same tool input repeatedly unless there is new rationale.
 
@@ -90,4 +98,5 @@ Critical output rules:
 3) Only use facts that exist in execution scratchpad or memory summary.
 4) Any missing/uncertain field must be null (never guess).
 5) Do not add extra keys.
+6) If domain is known from input/tools, fill it into the schema domain fields (do not leave domain null).
 `;
